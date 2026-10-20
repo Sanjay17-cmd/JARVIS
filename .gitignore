@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+pip-wheel-metadata/
+.installed.cfg
+*.egg-link
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# PyInstaller
+*.spec.bak
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# JARVIS generated assets (regenerated on first run)
+jarvis/assets/images/
+
+# JARVIS user data (lives in %APPDATA%\JARVIS)
+# Do NOT commit settings or logs
+*.log
+settings.json
+
+# Windows
+Thumbs.db
+desktop.ini
