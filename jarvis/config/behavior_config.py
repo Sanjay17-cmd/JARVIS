@@ -76,7 +76,8 @@ class BehaviorConfig:
                 json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
-            with temporary.open("rb") as handle:
+            with temporary.open("r+b") as handle:
+                handle.flush()
                 os.fsync(handle.fileno())
             temporary.replace(path)
         finally:

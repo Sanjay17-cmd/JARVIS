@@ -67,7 +67,7 @@ def is_startup_enabled() -> bool:
 
 # ── Settings migration ────────────────────────────────────────────────────────
 
-_SCHEMA_VERSION = 2   # increment when DEFAULTS changes shape
+_SCHEMA_VERSION = 3   # increment when DEFAULTS changes shape
 
 
 def migrate(data: dict[str, Any]) -> dict[str, Any]:

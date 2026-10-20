@@ -19,7 +19,8 @@ from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QObject
 from PySide6.QtGui import QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
-    QPushButton, QScrollArea, QLabel, QFrame, QSizePolicy,
+    QPushButton, QScrollArea, QLabel, QFrame, QSizePolicy, QDialog,
+    QListWidget, QListWidgetItem, QInputDialog, QMessageBox,
 )
 
 from jarvis.core.state import RobotState
@@ -191,6 +192,8 @@ class InteractionPanel(QWidget):
         self._stream_bubble: _MessageBubble | None = None
         self._streamed_response = ""
         self._stream_timestamp = ""
+        from jarvis.scheduling.database import active_conversation_id
+        self._conversation_id = active_conversation_id()
 
         self.setObjectName("InteractionPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -259,11 +262,19 @@ class InteractionPanel(QWidget):
         btn_close.setFixedSize(26, 26)
         btn_close.clicked.connect(self.close_requested)
         btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_chats = QPushButton("Chats")
+        self._btn_chats.setFixedWidth(54)
+        self._btn_chats.clicked.connect(self._show_chat_history)
+        self._btn_new_chat = QPushButton("New")
+        self._btn_new_chat.setFixedWidth(44)
+        self._btn_new_chat.clicked.connect(self.new_chat)
 
         title_row.addWidget(lbl_icon)
         title_row.addWidget(lbl_title)
         title_row.addStretch()
         title_row.addWidget(self._lbl_state)
+        title_row.addWidget(self._btn_chats)
+        title_row.addWidget(self._btn_new_chat)
         title_row.addWidget(btn_close)
         root.addWidget(self._title_bar)
 
@@ -386,7 +397,9 @@ class InteractionPanel(QWidget):
         from jarvis.scheduling.database import save_conversation_message
 
         try:
-            save_conversation_message(role, text, time())
+            save_conversation_message(
+                role, text, time(), conversation_id=self._conversation_id
+            )
         except Exception as exc:
             log.exception("Could not save conversation history")
             self._lbl_status.setText(f"⚠ Conversation history could not be saved: {exc}")
@@ -397,7 +410,9 @@ class InteractionPanel(QWidget):
             try:
                 from jarvis.scheduling.database import load_conversation_history
 
-                for item in load_conversation_history():
+                for item in load_conversation_history(
+                    conversation_id=self._conversation_id
+                ):
                     timestamp = datetime.fromtimestamp(item["created_at"]).strftime("%H:%M")
                     self._add_message(
                         item["content"],
@@ -417,6 +432,137 @@ class InteractionPanel(QWidget):
             is_user=False,
             persist=False,
         )
+
+    def new_chat(self) -> None:
+        from jarvis.scheduling.database import create_conversation
+
+        self._conversation_id = create_conversation()
+        self._clear_messages()
+        self._add_message(
+            "New conversation. Your previous chats remain available from Chats.",
+            is_user=False,
+            persist=False,
+        )
+
+    def open_conversation(self, conversation_id: str) -> None:
+        from jarvis.scheduling.database import (
+            conversation_messages,
+            set_active_conversation,
+        )
+
+        set_active_conversation(conversation_id)
+        self._conversation_id = conversation_id
+        self._clear_messages()
+        try:
+            messages = conversation_messages(conversation_id)
+            if not messages:
+                self._add_message("This conversation is empty.", is_user=False, persist=False)
+            for item in messages:
+                self._add_message(
+                    item["content"],
+                    is_user=item["role"] == "user",
+                    persist=False,
+                    timestamp=datetime.fromtimestamp(item["created_at"]).strftime("%H:%M"),
+                )
+        except Exception as exc:
+            log.exception("Could not open conversation %s", conversation_id)
+            self._lbl_status.setText(f"⚠ Could not open conversation: {exc}")
+            self._lbl_status.setVisible(True)
+
+    def _clear_messages(self) -> None:
+        while self._msg_layout.count() > 1:
+            item = self._msg_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _show_chat_history(self) -> None:
+        from jarvis.scheduling.database import (
+            delete_conversation,
+            list_conversations,
+            rename_conversation,
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Chat history")
+        dialog.setMinimumSize(420, 340)
+        layout = QVBoxLayout(dialog)
+        items = QListWidget(dialog)
+        layout.addWidget(items)
+
+        def refresh() -> None:
+            items.clear()
+            for conversation in list_conversations():
+                updated = datetime.fromtimestamp(
+                    conversation["updated_at"]
+                ).strftime("%Y-%m-%d %H:%M")
+                item = QListWidgetItem(
+                    f"{conversation['title']}  ·  {updated}"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, conversation["id"])
+                items.addItem(item)
+
+        refresh()
+        buttons = QHBoxLayout()
+        open_button = QPushButton("Open")
+        rename_button = QPushButton("Rename")
+        delete_button = QPushButton("Delete")
+        close_button = QPushButton("Close")
+        buttons.addWidget(open_button)
+        buttons.addWidget(rename_button)
+        buttons.addWidget(delete_button)
+        buttons.addStretch()
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        def selected_id() -> str | None:
+            item = items.currentItem()
+            return str(item.data(Qt.ItemDataRole.UserRole)) if item else None
+
+        def open_selected() -> None:
+            conversation_id = selected_id()
+            if conversation_id:
+                try:
+                    self.open_conversation(conversation_id)
+                    dialog.accept()
+                except Exception as exc:
+                    QMessageBox.warning(dialog, "Chat history", str(exc))
+
+        def rename_selected() -> None:
+            conversation_id = selected_id()
+            if not conversation_id:
+                return
+            current = items.currentItem().text().split("  ·  ", 1)[0]
+            title, accepted = QInputDialog.getText(
+                dialog, "Rename chat", "Title:", text=current
+            )
+            if accepted:
+                try:
+                    rename_conversation(conversation_id, title)
+                    refresh()
+                except Exception as exc:
+                    QMessageBox.warning(dialog, "Chat history", str(exc))
+
+        def delete_selected() -> None:
+            conversation_id = selected_id()
+            if not conversation_id:
+                return
+            answer = QMessageBox.question(
+                dialog, "Delete chat", "Delete this conversation permanently?"
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            delete_conversation(conversation_id)
+            if conversation_id == self._conversation_id:
+                self.new_chat()
+            refresh()
+
+        open_button.clicked.connect(open_selected)
+        items.itemDoubleClicked.connect(lambda _: open_selected())
+        rename_button.clicked.connect(rename_selected)
+        delete_button.clicked.connect(delete_selected)
+        close_button.clicked.connect(dialog.accept)
+        dialog.exec()
 
     def _set_busy(self, busy: bool) -> None:
         self._input.setEnabled(not busy)

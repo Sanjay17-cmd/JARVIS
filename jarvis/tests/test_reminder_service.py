@@ -22,6 +22,7 @@ from jarvis.scheduling.reminder_service import (
     add_reminder, get_reminders, get_upcoming_reminders,
     complete_reminder, snooze_reminder, delete_reminder, edit_reminder,
     add_alarm, get_alarms, dismiss_alarm, snooze_alarm,
+    edit_alarm,
     tick, parse_relative_time, parse_time_expression, format_due, _now,
 )
 
@@ -36,6 +37,25 @@ def test_parse_relative_hours():
     t = parse_relative_time("in 2 hours")
     assert abs(t - (_now() + 7200)) < 2
 
+@pytest.mark.parametrize(
+    ("text", "expected_seconds"),
+    [
+        ("in 5 seconds", 5),
+        ("for 2 mins", 120),
+        ("in 1 hour and 30 minutes", 5400),
+    ],
+)
+def test_parse_short_and_combined_durations(text, expected_seconds):
+    due = parse_relative_time(text)
+    assert due is not None
+    assert abs(due - (_now() + expected_seconds)) < 2
+
+
+def test_alarm_snooze_accepts_seconds():
+    aid = add_alarm("Short snooze", _now() + 1)
+    snooze_alarm(aid, seconds=2)
+    assert abs(get_alarms()[0]["due_at"] - (_now() + 2)) < 1
+
 def test_parse_relative_none():
     assert parse_relative_time("tomorrow morning") is None
 
@@ -43,6 +63,13 @@ def test_parse_time_expression_relative():
     t = parse_time_expression("in 10 minutes")
     assert t is not None
     assert t > _now()
+
+
+def test_parse_clock_time_and_reject_invalid_clock_time():
+    parsed = parse_time_expression("7:30 PM")
+    assert parsed is not None
+    assert time.localtime(parsed).tm_hour == 19
+    assert parse_time_expression("29:90 PM") is None
 
 def test_format_due_future():
     assert "min" in format_due(_now() + 900)   # 15 min
@@ -118,6 +145,18 @@ def test_snooze_alarm():
     assert alarms[0]["due_at"] > _now() + 200   # snoozed ~5 min
 
 
+def test_edit_alarm_resets_delivery_state():
+    aid = add_alarm("Old", _now() - 1)
+    tick()
+    new_due = _now() + 30
+    edit_alarm(aid, title="Updated", due_at=new_due)
+    alarm = get_alarms()[0]
+    assert alarm["title"] == "Updated"
+    assert alarm["due_at"] == new_due
+    assert alarm["notified"] == 0
+    assert alarm["status"] == "scheduled"
+
+
 # ── Scheduler tick + deduplication ───────────────────────────────────────────
 
 def test_tick_fires_due_reminder():
@@ -152,3 +191,18 @@ def test_recurring_reminder_reschedules_after_tick():
     tick()
     items = get_reminders()
     assert items[0]["due_at"] > _now() + 80000   # ~24h later
+
+
+def test_interval_reminder_reschedules_once_and_records_triggered_event():
+    rid = add_reminder(
+        "Frequent test", _now() - 2, recurrence="interval:10",
+        source_key="test:interval",
+    )
+    events = tick()
+    assert len(events) == 1
+    assert events[0]["id"] == rid
+    assert events[0]["source_key"] == "test:interval"
+    assert tick() == []
+    updated = get_reminders()[0]
+    assert updated["due_at"] > _now()
+    assert updated["status"] == "scheduled"

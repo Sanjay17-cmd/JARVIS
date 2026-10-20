@@ -17,6 +17,10 @@ from __future__ import annotations
 import logging
 import os
 import time
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Callable
 
@@ -85,10 +89,16 @@ class OpenAIProvider(AIProvider):
     Falls back to EchoProvider if openai package is missing or key absent.
     """
 
-    def __init__(self, model: str = "gpt-4o-mini", timeout: int = 30,
-                 system_prompt: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        timeout: int = 30,
+        system_prompt: str | None = None,
+        api_key_env_var: str = "OPENAI_API_KEY",
+    ) -> None:
         self._model   = model
         self._timeout = timeout
+        self._api_key_env_var = api_key_env_var
         self._system  = system_prompt or (
             "You are JARVIS, a helpful Windows desktop AI companion. "
             "Be concise, friendly, and practical. "
@@ -98,9 +108,9 @@ class OpenAIProvider(AIProvider):
         self._init()
 
     def _init(self) -> None:
-        key = os.environ.get("OPENAI_API_KEY", "")
+        key = os.environ.get(self._api_key_env_var, "")
         if not key:
-            log.warning("OPENAI_API_KEY not set — OpenAI provider unavailable.")
+            log.warning("%s not set — OpenAI provider unavailable.", self._api_key_env_var)
             return
         try:
             import openai
@@ -119,7 +129,12 @@ class OpenAIProvider(AIProvider):
 
     def ask_stream(self, text: str, on_chunk: Callable[[str], None]) -> str:
         if self._client is None:
-            return EchoProvider().ask_stream(text, on_chunk)
+            message = (
+                f"⚠ AI provider is unavailable. Check {self._api_key_env_var} and install "
+                "the optional openai package; local commands remain available."
+            )
+            on_chunk(message)
+            return message
         try:
             t0 = time.monotonic()
             resp = self._client.chat.completions.create(
@@ -148,6 +163,82 @@ class OpenAIProvider(AIProvider):
             return message
 
 
+class GeminiProvider(AIProvider):
+    """Google Gemini REST provider using an API key from the environment."""
+
+    def __init__(
+        self,
+        model: str = "gemini-2.5-flash",
+        timeout: int = 30,
+        api_key_env_var: str = "GEMINI_API_KEY",
+    ) -> None:
+        self._model = model
+        self._timeout = timeout
+        self._api_key_env_var = api_key_env_var
+
+    @property
+    def name(self) -> str:
+        return f"gemini/{self._model}"
+
+    def ask(self, text: str) -> str:
+        api_key = os.environ.get(self._api_key_env_var, "")
+        if not api_key:
+            return (
+                f"⚠ Gemini is unavailable. Set the {self._api_key_env_var} "
+                "environment variable; local commands remain available."
+            )
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{urllib.parse.quote(self._model, safe='')}:generateContent"
+        )
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": text}]}],
+            "generationConfig": {"maxOutputTokens": 512},
+        }
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            candidates = result.get("candidates", [])
+            parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+            answer = "\n".join(
+                str(part["text"]).strip()
+                for part in parts
+                if isinstance(part, dict) and part.get("text")
+            ).strip()
+            if not answer:
+                return "⚠ Gemini returned no text. Try a different model or prompt."
+            return answer
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("error", {}).get("message", "")
+            except (ValueError, UnicodeDecodeError):
+                detail = ""
+            detail = str(detail).replace(api_key, "[redacted]")
+            return (
+                f"⚠ Gemini request failed (HTTP {exc.code}). "
+                f"{detail or 'Check the model name, quota, and API key.'}"
+            )
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            return f"⚠ Gemini request failed: {str(exc).replace(api_key, '[redacted]')}"
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            log.warning("Invalid Gemini response: %s", type(exc).__name__)
+            return "⚠ Gemini returned an invalid response. Please retry."
+
+    def ask_stream(self, text: str, on_chunk: Callable[[str], None]) -> str:
+        answer = self.ask(text)
+        on_chunk(answer)
+        return answer
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 def get_provider(settings: "Settings") -> AIProvider:
@@ -155,5 +246,15 @@ def get_provider(settings: "Settings") -> AIProvider:
     if name == "openai":
         model   = settings.get("ai_model",   "gpt-4o-mini")
         timeout = settings.get("ai_timeout",  30)
-        return OpenAIProvider(model=model, timeout=timeout)
+        env_var = settings.get("ai_api_key_env_var", "OPENAI_API_KEY")
+        return OpenAIProvider(
+            model=model, timeout=timeout, api_key_env_var=env_var
+        )
+    if name == "gemini":
+        model = settings.get("ai_model", "") or "gemini-2.5-flash"
+        timeout = settings.get("ai_timeout", 30)
+        env_var = settings.get("ai_api_key_env_var", "GEMINI_API_KEY")
+        return GeminiProvider(
+            model=model, timeout=timeout, api_key_env_var=env_var
+        )
     return EchoProvider()

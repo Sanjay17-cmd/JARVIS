@@ -163,6 +163,7 @@ class RobotOverlay(QWidget):
         self._thread: QThread | None = None
         self._worker: _FrameWorker | None = None
         self._current_state = RobotState.IDLE
+        self._animation_override: str | None = None
         self._frame_index   = 0
         self._prev_frame_index = -1   # track changes to avoid redundant update()
 
@@ -223,6 +224,9 @@ class RobotOverlay(QWidget):
         self._status_hide_timer = QTimer(self)
         self._status_hide_timer.setSingleShot(True)
         self._status_hide_timer.timeout.connect(self._hide_status)
+        self._animation_timer = QTimer(self)
+        self._animation_timer.setSingleShot(True)
+        self._animation_timer.timeout.connect(self._clear_animation)
 
         self._place_initial()
         state_manager.add_listener(self._on_state_change)
@@ -322,6 +326,26 @@ class RobotOverlay(QWidget):
                 self.update()
                 return
 
+    def play_animation(self, name: str, duration_ms: int = 3000) -> bool:
+        """Play a distinct built-in animation, then return to current state."""
+        supported = {
+            "wave", "flying", "tools", "scanning", "typing",
+            "thirsty", "focus", "alarm", "confused", "success",
+        }
+        if name not in supported or not self._frames.get(name):
+            return False
+        self._animation_override = name
+        self._frame_index = 0
+        self._animation_timer.start(max(250, duration_ms))
+        self.update()
+        return True
+
+    @Slot()
+    def _clear_animation(self) -> None:
+        self._animation_override = None
+        self._frame_index = 0
+        self.update()
+
     # ── Placement ─────────────────────────────────────────────────────────────
 
     def _place_initial(self) -> None:
@@ -409,7 +433,7 @@ class RobotOverlay(QWidget):
 
         # --- Animation frame advance ---
         if self._frames_ready and self._settings.get("animation_enabled", True):
-            state_name = self._current_state.name.lower()
+            state_name = self._animation_override or self._current_state.name.lower()
             frames = self._frames.get(state_name) or self._frames.get("idle", [])
             if frames:
                 self._frame_index = (self._frame_index + 1) % len(frames)
@@ -446,7 +470,7 @@ class RobotOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         if self._frames_ready:
-            state_name = self._current_state.name.lower()
+            state_name = self._animation_override or self._current_state.name.lower()
             frames = self._frames.get(state_name) or self._frames.get("idle", [])
             if frames:
                 pad = 20
@@ -565,6 +589,8 @@ class RobotOverlay(QWidget):
 
     def _on_state_change(self, old: RobotState, new: RobotState) -> None:
         self._current_state = new
+        self._animation_timer.stop()
+        self._animation_override = None
         self._frame_index   = 0
         label = STATE_LABELS.get(new, "")
         self.show_status(label, 4000 if label else 0)

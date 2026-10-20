@@ -359,6 +359,44 @@ def generate_animation_frames(
             led_override= [(100,100,130,120),(100,100,130,60),
                            (100,100,130,40),(100,100,130,100)]
 
+        elif state == "wave":
+            head_tilt = math.sin(phase * 2) * 8
+            ant_phase = math.sin(phase * 4) * 1.5
+            glow_i = 0.75 + 0.2 * math.sin(phase * 3)
+        elif state == "flying":
+            bob_offset = -0.045 + math.sin(phase * 3) * 0.025
+            head_tilt = math.sin(phase * 2) * 5
+            ant_phase = -0.8
+            glow_i = 0.8
+        elif state == "tools":
+            head_tilt = math.sin(phase * 2) * 5
+            glow_i = 0.65 + 0.25 * abs(math.sin(phase * 4))
+            led_override = [(255, 180, 30, 255)] * 4
+        elif state == "scanning":
+            head_tilt = math.sin(phase) * 3
+            glow_i = 0.55 + 0.4 * abs(math.sin(phase * 3))
+            led_override = [(0, 240, 255, 255)] * 4
+        elif state == "typing":
+            bob_offset = math.sin(phase * 5) * 0.008
+            glow_i = 0.65 + 0.25 * abs(math.sin(phase * 8))
+            led_override = [(0, 210, 255, 230)] * 4
+        elif state == "thirsty":
+            head_tilt = math.sin(phase * 1.5) * 7
+            glow_i = 0.5 + 0.2 * math.sin(phase * 2)
+            led_override = [(70, 180, 255, 220)] * 4
+        elif state == "focus":
+            glow_i = 0.55 + 0.25 * abs(math.sin(phase * 2))
+            led_override = [(255, 210, 40, 230)] * 4
+        elif state == "alarm":
+            glow_i = 0.75 + 0.25 * abs(math.sin(phase * 4))
+            head_tilt = math.sin(phase * 6) * 4
+            led_override = [(255, 50, 50, 255)] * 4
+        elif state == "confused":
+            head_tilt = math.sin(phase * 1.4) * 11
+            ant_phase = math.sin(phase * 1.2) * 0.4
+            mouth_curve = -0.2
+            glow_i = 0.55 + 0.2 * math.sin(phase * 1.5)
+
         img = draw_robot(
             size=size,
             eye_brightness=glow_i,
@@ -379,11 +417,61 @@ def generate_animation_frames(
             shifted.paste(img, (0, shift))
             img = shifted
 
+        _draw_animation_effect(img, state, t)
         images.append(img)
         if output_dir:
             img.save(output_dir / f"{state}_{i:03d}.png", "PNG")
 
     return images
+
+
+def _draw_animation_effect(img: Image.Image, state: str, progress: float) -> None:
+    """Add lightweight vector effects while preserving the robot hitbox."""
+    size = img.width
+    d = ImageDraw.Draw(img, "RGBA")
+    cyan = (0, 220, 255, 210)
+    if state == "wave":
+        d.line((size*.72, size*.58, size*.87, size*.43), fill=cyan, width=max(2, size//45))
+        d.ellipse((size*.83, size*.37, size*.92, size*.46), fill=(0, 255, 190, 200))
+    elif state == "flying":
+        for offset in range(3):
+            x = size * (.35 + offset * .055)
+            y = size * (.79 + ((progress * 3 + offset * .2) % .2))
+            d.polygon(
+                [(x, y), (x + size*.035, y + size*.15), (x - size*.025, y + size*.12)],
+                fill=(255, 120 + offset*35, 20, 190 - offset*35),
+            )
+        d.ellipse((size*.25, size*.84, size*.75, size*.9), outline=(0, 210, 255, 80), width=2)
+    elif state == "tools":
+        x, y = size*.83, size*.61
+        d.line((x, y+size*.08, x+size*.08, y-size*.03), fill=(255, 195, 40, 240), width=max(3, size//24))
+        d.arc((x+size*.04, y-size*.09, x+size*.15, y+size*.02), 20, 300, fill=(255, 195, 40, 240), width=max(3, size//24))
+    elif state == "scanning":
+        y = size * (.5 + math.sin(progress * math.pi * 2) * .18)
+        d.line((size*.53, size*.46, size*.95, y), fill=(0, 240, 255, 150), width=max(2, size//65))
+        d.ellipse((size*.89, y-size*.04, size*.97, y+size*.04), outline=(0, 245, 255, 230), width=2)
+    elif state == "typing":
+        x0, y0, x1, y1 = size*.25, size*.83, size*.75, size*.92
+        d.rounded_rectangle((x0, y0, x1, y1), radius=max(2, size//40), fill=(0, 110, 180, 100), outline=cyan, width=2)
+        for row in range(2):
+            for col in range(5):
+                x, y = x0 + size*(.06+col*.08), y0 + size*(.025+row*.035)
+                d.rectangle((x, y, x+size*.035, y+size*.018), fill=(130, 240, 255, 200))
+    elif state == "thirsty":
+        x, y = size*.83, size*.34
+        d.polygon([(x, y-size*.07), (x-size*.045, y+size*.01), (x, y+size*.06), (x+size*.045, y+size*.01)], fill=(80, 190, 255, 220))
+    elif state == "focus":
+        radius = size * (.14 + .015 * math.sin(progress * math.pi * 2))
+        d.arc((size*.5-radius, size*.5-radius, size*.5+radius, size*.5+radius), 20, 300, fill=(255, 220, 45, 160), width=2)
+    elif state == "alarm":
+        for angle in range(0, 360, 45):
+            theta = math.radians(angle + progress * 60)
+            x0, y0 = size*.5 + math.cos(theta)*size*.39, size*.46 + math.sin(theta)*size*.39
+            x1, y1 = size*.5 + math.cos(theta)*size*.45, size*.46 + math.sin(theta)*size*.45
+            d.line((x0, y0, x1, y1), fill=(255, 60, 60, 180), width=2)
+    elif state == "confused":
+        d.ellipse((size*.74, size*.23, size*.9, size*.39), outline=(255, 220, 100, 230), width=2)
+        d.text((size*.785, size*.235), "?", fill=(255, 230, 130, 255))
 
 
 # ── cache-aware loader (size-stamped) ──────────────────────────────────────
@@ -412,10 +500,17 @@ def ensure_assets(asset_dir: Path, size: int = 200) -> dict[str, list[Image.Imag
                 pass
         stamp.write_text(str(size))
 
-    states = ["idle", "listening", "thinking", "speaking", "success", "error", "paused"]
+    states = [
+        "idle", "listening", "thinking", "speaking", "success", "error",
+        "paused", "wave", "flying", "tools", "scanning", "typing",
+        "thirsty", "focus", "alarm", "confused",
+    ]
     frame_counts = {
         "idle": 60, "listening": 40, "thinking": 40,
         "speaking": 40, "success": 30, "error": 30, "paused": 20,
+        "wave": 24, "flying": 24, "tools": 24, "scanning": 24,
+        "typing": 24, "thirsty": 24, "focus": 24, "alarm": 24,
+        "confused": 24,
     }
     result: dict[str, list[Image.Image]] = {}
     for state in states:

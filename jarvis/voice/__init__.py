@@ -20,11 +20,17 @@ class _CaptureWorker(QObject):
         stop_event: threading.Event,
         model_path: str,
         language: str,
+        device_index: int,
+        device: str,
+        compute_type: str,
     ) -> None:
         super().__init__()
         self._stop_event = stop_event
         self._model_path = model_path
         self._language = language.split("-", 1)[0]
+        self._device_index = None if device_index < 0 else device_index
+        self._device = device
+        self._compute_type = compute_type
 
     @Slot()
     def run(self) -> None:
@@ -35,7 +41,12 @@ class _CaptureWorker(QObject):
 
             audio_chunks = []
             stop_at = time.monotonic() + 120
-            with sd.InputStream(samplerate=16000, channels=1, dtype="float32") as stream:
+            with sd.InputStream(
+                samplerate=16000,
+                channels=1,
+                dtype="float32",
+                device=self._device_index,
+            ) as stream:
                 while not self._stop_event.is_set() and time.monotonic() < stop_at:
                     audio, _ = stream.read(1600)
                     audio_chunks.append(audio[:, 0].copy())
@@ -46,9 +57,8 @@ class _CaptureWorker(QObject):
 
             model = WhisperModel(
                 self._model_path,
-                device="cpu",
-                compute_type="int8",
-                local_files_only=True,
+                device=self._device,
+                compute_type=self._compute_type,
             )
             segments, _ = model.transcribe(
                 np.concatenate(audio_chunks),
@@ -65,19 +75,56 @@ class _CaptureWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class _ModelSetupWorker(QObject):
+    progress = Signal(str)
+    initialized = Signal()
+    failed = Signal(str)
+
+    def __init__(self, model: str, device: str, compute_type: str) -> None:
+        super().__init__()
+        self._model = model
+        self._device = device
+        self._compute_type = compute_type
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            from faster_whisper import WhisperModel
+
+            self.progress.emit(f"Initializing {self._model}; first setup may download it.")
+            WhisperModel(
+                self._model,
+                device=self._device,
+                compute_type=self._compute_type,
+            )
+            self.initialized.emit()
+        except Exception as exc:
+            log.exception("Voice model initialization failed")
+            self.failed.emit(
+                f"Model initialization failed: {exc}. Check internet access for "
+                "the first download, available disk space, and the model path."
+            )
+
+
 class VoiceController(QObject):
     """Runs microphone capture and local transcription outside the GUI thread."""
 
     listening_changed = Signal(bool)
     transcription_ready = Signal(str)
     error = Signal(str)
+    setup_progress = Signal(str)
+    model_initialized = Signal(str)
+    setup_failed = Signal(str)
 
     def __init__(self, settings, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._thread: QThread | None = None
         self._worker: _CaptureWorker | None = None
+        self._setup_thread: QThread | None = None
+        self._setup_worker: _ModelSetupWorker | None = None
         self._stop_event: threading.Event | None = None
+        self._model_ready = bool(settings.get("voice_model_ready", False))
 
     @property
     def is_listening(self) -> bool:
@@ -86,12 +133,18 @@ class VoiceController(QObject):
     def start_listening(self) -> None:
         if self.is_listening:
             return
+        if not self._settings.get("voice_enabled", False):
+            self.error.emit("Voice is disabled in Settings. Enable it in Voice Setup.")
+            return
 
-        model_path = str(self._settings.get("voice_model_path", "")).strip()
-        if not model_path or not Path(model_path).is_dir():
+        model_path = str(
+            self._settings.get("voice_model_path", "")
+            or self._settings.get("voice_model_id", "base.en")
+        ).strip()
+        if not self._model_ready:
             self.error.emit(
-                "Voice needs a local faster-whisper model directory. "
-                "Set voice_model_path in advanced_settings.ini."
+                f"Voice model '{model_path}' is not initialized. Open Settings → "
+                "Voice Setup and select Initialize Model (first-time download needs consent)."
             )
             return
 
@@ -100,7 +153,7 @@ class VoiceController(QObject):
             import faster_whisper  # noqa: F401
         except ImportError as exc:
             self.error.emit(
-                "Local voice packages are not installed. Run: "
+                "Voice dependencies are missing. Install with: "
                 "pip install sounddevice faster-whisper"
             )
             log.info("Voice unavailable: %s", exc)
@@ -112,6 +165,9 @@ class VoiceController(QObject):
             self._stop_event,
             model_path,
             str(self._settings.get("voice_language", "en-US")),
+            int(self._settings.get("voice_microphone_id", -1)),
+            str(self._settings.get("voice_device", "cpu")),
+            str(self._settings.get("voice_compute_type", "int8")),
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -124,6 +180,99 @@ class VoiceController(QObject):
         self._thread.finished.connect(self._on_finished)
         self._thread.start()
         self.listening_changed.emit(True)
+
+    def initialize_model(self) -> None:
+        if self._setup_thread is not None or self.is_listening:
+            self.setup_failed.emit("Voice setup or recording is already in progress.")
+            return
+        try:
+            import faster_whisper  # noqa: F401
+        except ImportError:
+            self.setup_failed.emit(
+                "Install faster-whisper first: pip install faster-whisper"
+            )
+            return
+        model = str(
+            self._settings.get("voice_model_path", "")
+            or self._settings.get("voice_model_id", "base.en")
+        ).strip()
+        if not model:
+            self.setup_failed.emit("Choose a model name or browse to a local model folder.")
+            return
+        path = Path(model)
+        if ("/" in model or "\\" in model) and not path.is_dir():
+            self.setup_failed.emit(f"Model directory does not exist: {path}")
+            return
+        self._settings.set("voice_model_ready", False)
+        self._setup_thread = QThread(self)
+        self._setup_worker = _ModelSetupWorker(
+            model,
+            str(self._settings.get("voice_device", "cpu")),
+            str(self._settings.get("voice_compute_type", "int8")),
+        )
+        self._setup_worker.moveToThread(self._setup_thread)
+        self._setup_thread.started.connect(self._setup_worker.run)
+        self._setup_worker.progress.connect(self.setup_progress)
+        self._setup_worker.initialized.connect(self._on_model_initialized)
+        self._setup_worker.failed.connect(self.setup_failed)
+        self._setup_worker.initialized.connect(self._setup_thread.quit)
+        self._setup_worker.failed.connect(self._setup_thread.quit)
+        self._setup_worker.initialized.connect(self._setup_worker.deleteLater)
+        self._setup_worker.failed.connect(self._setup_worker.deleteLater)
+        self._setup_thread.finished.connect(self._on_setup_finished)
+        self._setup_thread.start()
+
+    @Slot()
+    def _on_model_initialized(self) -> None:
+        model = str(
+            self._settings.get("voice_model_path", "")
+            or self._settings.get("voice_model_id", "base.en")
+        ).strip()
+        self._settings.set("voice_model_ready", True)
+        self._settings.save()
+        self._model_ready = True
+        self.model_initialized.emit(model)
+
+    @Slot()
+    def _on_setup_finished(self) -> None:
+        thread = self._setup_thread
+        self._setup_thread = None
+        self._setup_worker = None
+        if thread is not None:
+            thread.deleteLater()
+
+    @staticmethod
+    def input_devices() -> list[tuple[int, str]]:
+        import sounddevice as sd
+
+        return [
+            (index, device["name"])
+            for index, device in enumerate(sd.query_devices())
+            if int(device.get("max_input_channels", 0)) > 0
+        ]
+
+    def test_microphone(self) -> str:
+        try:
+            devices = self.input_devices()
+            selected = int(self._settings.get("voice_microphone_id", -1))
+            if selected < 0:
+                selected = int(__import__("sounddevice").default.device[0])
+            if selected < 0 or selected >= len(__import__("sounddevice").query_devices()):
+                raise RuntimeError("No usable microphone is selected.")
+            import sounddevice as sd
+
+            sd.rec(
+                int(0.5 * 16000),
+                samplerate=16000,
+                channels=1,
+                dtype="float32",
+                device=selected,
+                blocking=True,
+            )
+            return f"Microphone test recorded successfully (device {selected})."
+        except Exception as exc:
+            log.exception("Microphone test failed")
+            return f"Microphone unavailable: {exc}"
 
     def stop_listening(self) -> None:
         if self._stop_event is not None:
@@ -150,6 +299,14 @@ class VoiceController(QObject):
             target=self._speak_blocking,
             args=(text,),
             name="jarvis-tts",
+            daemon=True,
+        ).start()
+
+    def test_speech(self) -> None:
+        threading.Thread(
+            target=self._speak_blocking,
+            args=("JARVIS text to speech test.",),
+            name="jarvis-tts-test",
             daemon=True,
         ).start()
 

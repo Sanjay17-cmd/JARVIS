@@ -10,10 +10,11 @@ Reminders: hydration (drink water), stretch, eye-rest (20-20-20 rule).
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QTimer, QObject, Slot
+from PySide6.QtCore import QObject
 
 if TYPE_CHECKING:
     from jarvis.config.settings import Settings
@@ -75,42 +76,75 @@ class WellnessService(QObject):
         super().__init__()
         self._s   = settings
         self._adv = adv
-        self._timers: dict[str, QTimer] = {}
 
     def start(self) -> None:
-        if not self._s.get("wellness_enabled", True):
-            log.info("Wellness reminders disabled.")
-            return
+        from jarvis.scheduling import database as db
+        from jarvis.scheduling.reminder_service import add_reminder
+
+        enabled = self._s.get("wellness_enabled", True)
         for item in _WELLNESS_ITEMS:
-            if self._s.get(item["enabled_key"], True):
-                self._create_timer(item)
-        log.info("Wellness service started (%d timers).", len(self._timers))
+            source_key = f"wellness:{item['key']}"
+            should_enable = enabled and self._s.get(item["enabled_key"], True)
+            row = db.execute(
+                "SELECT * FROM reminders WHERE source_key=?", (source_key,)
+            ).fetchone()
+            if not should_enable:
+                if row:
+                    db.execute(
+                        "UPDATE reminders SET enabled=0,status='dismissed' "
+                        "WHERE source_key=? AND completed=0",
+                        (source_key,),
+                    )
+                continue
+            interval_seconds = int(
+                self._s.get(
+                    f"wellness_{item['key']}_interval_seconds",
+                    int(self._adv.get(item["adv_key"], item["default"]) * 60),
+                )
+            )
+            if interval_seconds <= 0:
+                interval_seconds = int(self._adv.get(item["adv_key"], item["default"]) * 60)
+            if row is None:
+                add_reminder(
+                    item["title"],
+                    time.time() + interval_seconds,
+                    item["body"],
+                    recurrence=f"interval:{interval_seconds}",
+                    source_key=source_key,
+                )
+            else:
+                reset_schedule = (
+                    row["recurrence"] != f"interval:{interval_seconds}"
+                    or not row["enabled"]
+                    or row["completed"]
+                )
+                db.execute(
+                    "UPDATE reminders SET title=?,description=?,recurrence=?,"
+                    "enabled=1,completed=0,status='scheduled',"
+                    "due_at=CASE WHEN ? THEN ? ELSE due_at END,"
+                    "notified=CASE WHEN ? THEN 0 ELSE notified END "
+                    "WHERE source_key=?",
+                    (
+                        item["title"], item["body"], f"interval:{interval_seconds}",
+                        int(reset_schedule), time.time() + interval_seconds,
+                        int(reset_schedule), source_key,
+                    ),
+                )
+        db.commit()
+        log.info("Persistent wellness reminders synchronized.")
 
     def stop(self) -> None:
-        for t in self._timers.values():
-            t.stop()
-        self._timers.clear()
+        # Pending reminders remain in SQLite and are reconstructed on next launch.
+        return
 
     def refresh(self) -> None:
-        """Call after settings change to restart timers with new intervals."""
-        self.stop()
+        """Reconcile persisted wellness schedules with the current settings."""
         self.start()
 
-    def _create_timer(self, item: dict) -> None:
-        interval_min = self._adv.get(item["adv_key"], item["default"])
-        t = QTimer(self)
-        t.setInterval(int(interval_min * 60 * 1000))
-        t.timeout.connect(lambda i=item: self._fire(i))
-        t.start()
-        self._timers[item["key"]] = t
-        log.debug("Wellness timer '%s' every %d min", item["key"], interval_min)
-
-    def _fire(self, item: dict) -> None:
-        if not self._s.get("wellness_enabled", True):
-            return
-        if _in_quiet_hours(self._s) or not _in_active_hours(self._adv):
-            log.debug("Wellness '%s' skipped (quiet/inactive hours)", item["key"])
-            return
-        from jarvis.ui.notification import notify
-        notify(item["icon"], item["title"], item["body"], duration_ms=8000)
-        log.info("Wellness: %s", item["title"])
+    def can_deliver(self) -> bool:
+        return (
+            self._s.get("wellness_enabled", True)
+            and self._s.get("notifications_enabled", True)
+            and not _in_quiet_hours(self._s)
+            and _in_active_hours(self._adv)
+        )

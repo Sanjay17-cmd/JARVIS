@@ -40,8 +40,12 @@ DEFAULTS: dict[str, Any] = {
     # ── Voice ────────────────────────────────────────────────────────────────
     "voice_enabled":        False,
     "voice_wake_word":      "jarvis",
+    "voice_model_id":       "base.en",
     "voice_language":       "en-US",
     "voice_model_path":     "",          # local faster-whisper model directory
+    "voice_device":         "cpu",
+    "voice_compute_type":   "int8",
+    "voice_microphone_id":  -1,
     "tts_enabled":          False,
     "tts_voice":            "",          # empty = system default
     "tts_rate":             175,         # words per minute
@@ -56,6 +60,9 @@ DEFAULTS: dict[str, Any] = {
     "ai_model":             "",
     "ai_api_key_env_var":   "JARVIS_AI_API_KEY",
     "ai_timeout":           30,          # seconds
+    "ai_trigger_enabled":   True,
+    "ai_trigger_keyword":   "Friday",
+    "ai_trigger_aliases":   [],
 
     # ── Focus mode ───────────────────────────────────────────────────────────
     "focus_duration_minutes":       25,
@@ -64,6 +71,7 @@ DEFAULTS: dict[str, Any] = {
     "focus_pomodoro_enabled":       True,
     "focus_distraction_nudge":      False,  # opt-in
     "focus_nudge_cooldown_minutes": 10,
+    "focus_app_rules":      [],
 
     # ── Wellness ─────────────────────────────────────────────────────────────
     "wellness_enabled":              True,
@@ -73,6 +81,9 @@ DEFAULTS: dict[str, Any] = {
     "wellness_stretch_interval":     60,
     "wellness_eyerest_enabled":      False,
     "wellness_eyerest_interval":     20,
+    "wellness_hydration_interval_seconds": 0,  # 0 = use advanced-config minutes
+    "wellness_stretch_interval_seconds":    0,
+    "wellness_eyerest_interval_seconds":    0,
     "wellness_active_hour_start":    8,      # hour of day
     "wellness_active_hour_end":      22,
 
@@ -106,6 +117,7 @@ VALIDATORS: dict[str, tuple] = {
     "tts_rate":                   (int,   50,  400),
     "tts_volume":                 (float, 0.0, 1.0),
     "ai_timeout":                 (int,   5,   300),
+    "voice_microphone_id":        (int,   -1,   256),
     "focus_duration_minutes":     (int,   1,   240),
     "focus_short_break_minutes":  (int,   1,   60),
     "focus_long_break_minutes":   (int,   5,   120),

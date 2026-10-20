@@ -21,7 +21,10 @@ class _Advanced:
         }.get(key, default)
 
 
-def test_wellness_only_starts_enabled_reminder_types(qtbot):
+def test_wellness_persists_only_enabled_reminder_types(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    from jarvis.scheduling import database
+    database._conn = None
     settings = _Settings({
         "wellness_enabled": True,
         "wellness_hydration_enabled": True,
@@ -31,9 +34,25 @@ def test_wellness_only_starts_enabled_reminder_types(qtbot):
     service = WellnessService(settings, _Advanced())
     service.start()
     try:
-        assert set(service._timers) == {"hydration"}
+        rows = database.execute(
+            "SELECT source_key,recurrence FROM reminders"
+        ).fetchall()
+        assert [(row["source_key"], row["recurrence"]) for row in rows] == [
+            ("wellness:hydration", "interval:3600")
+        ]
+        first_due = database.execute(
+            "SELECT due_at FROM reminders WHERE source_key='wellness:hydration'"
+        ).fetchone()["due_at"]
+        service.refresh()
+        assert database.execute(
+            "SELECT COUNT(*) FROM reminders WHERE source_key='wellness:hydration'"
+        ).fetchone()[0] == 1
+        assert database.execute(
+            "SELECT due_at FROM reminders WHERE source_key='wellness:hydration'"
+        ).fetchone()["due_at"] == first_due
     finally:
         service.stop()
+        database.close()
 
 
 def test_focus_duration_is_bounded(qtbot):
@@ -41,3 +60,22 @@ def test_focus_duration_is_bounded(qtbot):
     assert "between 1 and 240" in service.start_focus(0)
     assert "between 1 and 240" in service.start_focus(241)
     assert not service.is_active
+
+
+def test_focus_rule_matching_uses_process_or_exact_path():
+    rule = {
+        "process": "browser.exe",
+        "path": r"C:\Apps\Browser\browser.exe",
+    }
+    assert FocusService._rule_matches(
+        rule,
+        {"process": "browser.exe", "path": r"D:\Other\browser.exe", "pid": "12"},
+    )
+    assert FocusService._rule_matches(
+        rule,
+        {"process": "other.exe", "path": r"C:\Apps\Browser\browser.exe", "pid": "12"},
+    )
+    assert not FocusService._rule_matches(
+        rule,
+        {"process": "other.exe", "path": r"D:\Other\app.exe", "pid": "12"},
+    )

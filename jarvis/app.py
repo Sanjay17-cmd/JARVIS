@@ -52,6 +52,7 @@ from jarvis.ui.interaction_panel import InteractionPanel
 from jarvis.ui.tray import TrayManager
 from jarvis.ui.settings_dialog import SettingsDialog
 from jarvis.actions.windows_app_launcher import WindowsAppLauncher
+from jarvis.config.behavior_config import BehaviorConfig
 
 
 class JarvisApp:
@@ -73,6 +74,16 @@ class JarvisApp:
         self._state_manager = StateManager()
         self._event_bus     = EventBus()
         self._router        = CommandRouter()
+        self._behavior = BehaviorConfig()
+        self._behavior_error = ""
+        try:
+            self._router.set_responses(
+                self._behavior.load("responses").get("responses", {})
+            )
+        except Exception as exc:
+            self._behavior_error = str(exc)
+            log.error("Behavior responses could not be loaded: %s", exc)
+        self._router.set_ai_keywords(self._ai_keywords())
 
         # Advanced config (INI — user-editable)
         from jarvis.config.advanced_config import AdvancedConfig
@@ -82,7 +93,10 @@ class JarvisApp:
         self._settings.set("safe_margin",    self._adv.get("safe_margin",    20))
         self._settings.set("animation_fps",  self._adv.get("animation_fps",  30))
         self._settings.set("tts_rate",       self._adv.get("tts_rate",       175))
-        self._settings.set("voice_model_path", self._adv.get("voice_model_path", ""))
+        legacy_model_path = self._adv.get("voice_model_path", "")
+        if legacy_model_path and not self._settings.get("voice_model_path", ""):
+            self._settings.set("voice_model_path", legacy_model_path)
+            self._settings.save()
 
         _setup_logging(self._settings.get("log_level", "INFO"))
         log.info("JARVIS v2.0.0 starting up…")
@@ -104,10 +118,8 @@ class JarvisApp:
 
         # ── Part J — AI provider ──────────────────────────────────────────
         from jarvis.ai.provider import get_provider
-        self._ai_provider = get_provider(self._settings)
-        stream_handler = getattr(self._ai_provider, "ask_stream", None)
-        self._router.register_ai_fallback(self._ai_provider.ask, stream_handler)
-        log.info("AI provider: %s", self._ai_provider.name)
+        self._ai_provider_factory = get_provider
+        self._configure_ai_provider()
 
         # ── UI ────────────────────────────────────────────────────────────
         panels_top = self._settings.get("panels_always_on_top", True)
@@ -181,11 +193,14 @@ class JarvisApp:
         self._router._commands["focusstop"]  = lambda t: self._focus.stop()
         self._router._commands["focusskip"]  = lambda t: self._focus.skip_break()
         self._router._commands["focusstatus"]= lambda t: self._focus.status()
+        self._register_custom_actions()
+        self._reload_behavior_config()
 
         # ── Scheduler tick (Part E) ───────────────────────────────────────
         from PySide6.QtCore import QTimer as _QTimer
         self._sched_timer = _QTimer()
-        self._sched_timer.setInterval(30_000)
+        # Overdue entries found after startup are delivered once on the first tick.
+        self._sched_timer.setInterval(1_000)
         self._sched_timer.timeout.connect(self._on_scheduler_tick)
         self._sched_timer.start()
 
@@ -200,10 +215,57 @@ class JarvisApp:
             for ev in events:
                 title   = ev.get("title", "Reminder")
                 ev_type = ev.get("type", "reminder")
-                icon    = "⏰" if ev_type == "alarm" else "🔔"
-                # Toast notification (Part I)
+                source_key = str(ev.get("source_key", ""))
+                if str(ev.get("source_key", "")).startswith("wellness:"):
+                    if hasattr(self, "_wellness") and not self._wellness.can_deliver():
+                        continue
+                icon = (
+                    "💧" if source_key == "wellness:hydration"
+                    else "⏰" if ev_type == "alarm"
+                    else "🔔"
+                )
+                if (
+                    ev_type == "alarm"
+                    and ev.get("sound", True)
+                    and self._settings.get("sound_enabled", False)
+                ):
+                    try:
+                        import winsound
+                        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                    except (ImportError, OSError):
+                        log.warning("Alarm sound unavailable; using in-app notification.")
                 from jarvis.ui.notification import notify
-                notify(icon, title, duration_ms=8000)
+                item_id = int(ev["id"])
+                if ev_type == "alarm":
+                    done = lambda i=item_id: self._dismiss_due_item("alarm", i)
+                    snooze = lambda i=item_id: self._snooze_due_item("alarm", i)
+                    animation = "alarm"
+                else:
+                    recurring = str(ev.get("recurrence", "")).startswith("interval:")
+                    if recurring:
+                        done = lambda i=item_id: self._ack_recurring_reminder(i)
+                    else:
+                        done = lambda i=item_id: self._dismiss_due_item(
+                            "reminder", i, complete=True
+                        )
+                    snooze = lambda i=item_id: self._snooze_due_item("reminder", i)
+                    animation = (
+                        "thirsty"
+                        if source_key == "wellness:hydration"
+                        or "water" in title.casefold()
+                        or "drink" in title.casefold()
+                        else "success"
+                    )
+                notify(
+                    icon, title, ev.get("description", ""),
+                    duration_ms=30000,
+                    actions=[
+                        ("Done", done),
+                        ("Snooze 5 minutes", snooze),
+                        ("Dismiss", lambda i=item_id, t=ev_type: self._dismiss_due_item(t, i)),
+                    ],
+                )
+                self._overlay.play_animation(animation, duration_ms=6000)
                 # Overlay status bar
                 self._overlay.show_status(f"{icon} {title}", 6000)
                 # Chest indicator (Part K)
@@ -267,6 +329,10 @@ class JarvisApp:
         dlg = SettingsDialog(
             self._settings,
             panels_always_on_top=panels_top,
+            behavior=self._behavior,
+            router=self._router,
+            voice_controller=self._panel._voice,
+            overlay=self._overlay,
             parent=None,
         )
         dlg.settings_changed.connect(self._apply_settings)
@@ -288,10 +354,156 @@ class JarvisApp:
         )
         dlg.exec()
 
+    def _open_reminders(self) -> None:
+        from jarvis.ui.reminders_dialog import RemindersDialog
+
+        RemindersDialog(
+            panels_always_on_top=self._settings.get("panels_always_on_top", True),
+            parent=self._panel,
+        ).exec()
+
+    def _dismiss_due_item(
+        self, kind: str, item_id: int, complete: bool = False
+    ) -> None:
+        from jarvis.scheduling import reminder_service
+        if kind == "reminder":
+            if complete:
+                reminder_service.complete_reminder(item_id)
+            else:
+                reminder_service.dismiss_reminder(item_id)
+        else:
+            reminder_service.dismiss_alarm(item_id)
+
+    def _snooze_due_item(self, kind: str, item_id: int) -> None:
+        from jarvis.scheduling import reminder_service
+        if kind == "reminder":
+            reminder_service.snooze_reminder(item_id, seconds=300)
+        else:
+            reminder_service.snooze_alarm(item_id, seconds=300)
+
+    @staticmethod
+    def _ack_recurring_reminder(item_id: int) -> None:
+        from jarvis.scheduling.reminder_service import acknowledge_recurring_reminder
+        acknowledge_recurring_reminder(item_id)
+
+    def _ai_keywords(self) -> list[str]:
+        if not self._settings.get("ai_trigger_enabled", True):
+            return []
+        keyword = str(self._settings.get("ai_trigger_keyword", "Friday")).strip()
+        aliases = self._settings.get("ai_trigger_aliases", [])
+        return ([keyword] if keyword else []) + [
+            str(alias).strip() for alias in aliases if str(alias).strip()
+        ]
+
+    def _configure_ai_provider(self) -> None:
+        self._ai_provider = self._ai_provider_factory(self._settings)
+        stream_handler = getattr(self._ai_provider, "ask_stream", None)
+        self._router.register_ai_fallback(self._ai_provider.ask, stream_handler)
+        log.info("AI provider: %s", self._ai_provider.name)
+
+    def _register_custom_actions(self) -> None:
+        import time
+        import webbrowser
+        from urllib.parse import urlparse
+
+        def open_app(args: dict) -> str:
+            name = str(args.get("app_name", "")).strip()
+            return self._launcher.launch(name) if name else "❌ app_name is required."
+
+        def open_website(args: dict) -> str:
+            url = str(args.get("url", "")).strip()
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return "❌ Website URL must use http:// or https://."
+            if not webbrowser.open(url):
+                return f"❌ Could not open {url}."
+            return f"Opening {url}."
+
+        def create_scheduled(kind: str, args: dict) -> str:
+            try:
+                seconds = int(args.get("seconds", 0))
+                title = str(args.get("title", "")).strip()
+                if seconds <= 0 or not title:
+                    return "❌ A title and positive seconds duration are required."
+                from jarvis.scheduling import reminder_service
+                due = time.time() + seconds
+                item_id = (
+                    reminder_service.add_reminder(title, due)
+                    if kind == "reminder"
+                    else reminder_service.add_alarm(title, due)
+                )
+                return f"Scheduled {kind} #{item_id}: {title}."
+            except (TypeError, ValueError, OSError) as exc:
+                log.exception("Could not create custom %s", kind)
+                return f"❌ Could not create {kind}: {exc}"
+
+        self._custom_actions = {
+            "open_app": open_app,
+            "open_website": open_website,
+            "show_tasks": lambda _args: self._show_tasks_action(False),
+            "show_completed_tasks": lambda _args: self._show_tasks_action(True),
+            "create_reminder": lambda args: create_scheduled("reminder", args),
+            "create_alarm": lambda args: create_scheduled("alarm", args),
+            "start_focus": lambda args: self._focus.start_focus(int(args.get("minutes", 25))),
+            "stop_focus": lambda _args: self._focus.stop(),
+            "open_settings": lambda _args: self._open_settings() or "Opened Settings.",
+            "play_animation": lambda args: self._play_animation_action(args),
+            "new_chat": lambda _args: self._new_chat_action(),
+            "daily_briefing": lambda _args: self._daily_briefing(),
+        }
+
+    def _reload_behavior_config(self) -> None:
+        try:
+            responses = self._behavior.load("responses").get("responses", {})
+            commands = self._behavior.load("commands").get("commands", [])
+            self._router.set_responses(responses)
+            self._router.set_custom_commands(
+                commands, getattr(self, "_custom_actions", {})
+            )
+            self._behavior_error = ""
+        except Exception as exc:
+            self._behavior_error = str(exc)
+            log.error("Behavior configuration reload failed: %s", exc)
+
+    def _show_tasks_action(self, completed: bool) -> str:
+        from jarvis.ui.task_dialog import TaskDialog
+        TaskDialog(
+            self._settings.get("panels_always_on_top", True),
+            self._panel,
+            show_completed=completed,
+        ).show()
+        return "Opened Completed Tasks." if completed else "Opened Active Tasks."
+
+    def _new_chat_action(self) -> str:
+        self._panel.new_chat()
+        if not self._panel.isVisible():
+            self._toggle_panel()
+        return "Started a new chat."
+
+    def _play_animation_action(self, args: dict) -> str:
+        name = str(args.get("name", "")).strip().casefold()
+        name = {"fly": "flying", "repair": "tools", "scan": "scanning"}.get(name, name)
+        if not self._overlay.play_animation(name):
+            return f"❌ Animation '{name}' is not available."
+        return f"Playing {name} animation."
+
+    @staticmethod
+    def _daily_briefing() -> str:
+        from jarvis.scheduling.task_service import get_tasks
+        from jarvis.scheduling.reminder_service import get_upcoming_reminders
+        return (
+            f"You have {len(get_tasks())} active task(s) and "
+            f"{len(get_upcoming_reminders(5))} upcoming reminder(s)."
+        )
+
     def _focus_command(self, text: str) -> str:
         action = text.lower().split()[1:] or ["start"]
         if action[0] in {"stop", "end"}:
             return self._focus.stop()
+        if action[0] == "resume":
+            return self._focus.resume()
+        if action[0] == "pause":
+            return self._focus.pause()
         if action[0] == "status":
             return self._focus.status()
         if action[0] in {"skip", "next"}:
@@ -334,6 +546,10 @@ class JarvisApp:
 
         # 8. Custom apps
         self._launcher.update_custom_apps(s.get("custom_apps", []))
+        self._router.set_ai_keywords(self._ai_keywords())
+        self._configure_ai_provider()
+        if hasattr(self, "_focus"):
+            self._focus.refresh_rules()
         if hasattr(self, "_wellness"):
             self._wellness.refresh()
 
@@ -394,10 +610,8 @@ class JarvisApp:
             self._focus.start_focus()
 
     def _chest_reminders(self) -> None:
-        """Show reminder commands in the chat panel."""
-        self._panel.show()
-        self._panel.raise_()
-        self._panel.set_input_text("reminders")
+        """Open the persistent reminder and alarm manager."""
+        self._open_reminders()
 
     def _chest_quick_menu(self) -> None:
         """Open the panel's task manager and quick commands."""

@@ -88,3 +88,80 @@ def test_route_stream_forwards_ai_chunks(router):
     result = router.route_stream("question", chunks.append)
     assert result == "AI reply"
     assert chunks == ["AI ", "reply"]
+
+
+def test_configured_ai_keyword_strips_prefix_and_forces_ai(router):
+    calls = []
+    router.register_ai_fallback(lambda text: calls.append(text) or "AI result")
+    router.set_ai_keywords(["Friday", "Computer"])
+
+    assert router.route("FrIdAy, explain recursion") == "AI result"
+    assert calls == ["explain recursion"]
+    assert router.route("Computer: search for current AI news") == "AI result"
+    assert calls[-1] == "search for current AI news"
+    assert not router.has_builtin("Friday, hello")
+
+
+def test_custom_command_normalizes_punctuation_and_whitespace(router):
+    invoked = []
+    router.set_custom_commands(
+        [{
+            "id": "greet-team",
+            "name": "Greet the team",
+            "triggers": ["greet the team"],
+            "aliases": [],
+            "action": "greet",
+            "arguments": {"name": "team"},
+            "enabled": True,
+            "reply": "Hello, {name}!",
+        }],
+        {"greet": lambda args: invoked.append(args) or "completed"},
+    )
+
+    assert router.route("  Greet,   the team! ") == "Hello, team!"
+    assert invoked == [{"name": "team"}]
+
+
+def test_custom_command_action_failure_is_not_reported_as_success(router):
+    router.set_custom_commands(
+        [{
+            "id": "bad-action",
+            "name": "Bad action",
+            "triggers": ["bad action"],
+            "aliases": [],
+            "action": "bad",
+            "arguments": {},
+            "enabled": True,
+            "reply": "This reply must not hide failure",
+        }],
+        {"bad": lambda _args: "❌ action failed"},
+    )
+
+    assert router.route("bad action") == "❌ action failed"
+
+
+def test_response_templates_are_applied_to_builtin_interactions(router):
+    router.set_responses({
+        "greeting": ["Welcome back!"],
+        "unsupported_command": ["No match for this request."],
+    })
+    assert router.route("hello") == "Welcome back!"
+    assert router.route("unsupported_phrase") == "No match for this request."
+
+
+def test_ambiguous_custom_trigger_returns_actionable_error(router):
+    commands = [
+        {
+            "id": f"ambiguous-{index}",
+            "name": f"Command {index}",
+            "triggers": ["same phrase"],
+            "aliases": [],
+            "action": "noop",
+            "arguments": {},
+            "enabled": True,
+        }
+        for index in range(2)
+    ]
+    router.set_custom_commands(commands, {"noop": lambda _args: "done"})
+    assert router.has_builtin("same phrase")
+    assert "multiple custom commands" in router.route("same phrase")

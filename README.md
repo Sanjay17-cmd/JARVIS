@@ -23,12 +23,11 @@ pip install -r requirements.txt
 ```
 
 ### Optional local voice
-The app stays lightweight and works without speech packages. For local push-to-talk,
-install `sounddevice` and `faster-whisper`, download a faster-whisper model yourself,
-then set `voice_model_path` in `%APPDATA%\JARVIS\advanced_settings.ini` to that
-local model directory. JARVIS does not download models or send microphone audio to
-an online service. Enable `tts_enabled` in `%APPDATA%\JARVIS\settings.json` to use
-optional `pyttsx3` speech output.
+The app stays lightweight and works without speech packages. Open Settings → Voice
+Setup, enable voice, choose a microphone and model, then explicitly initialize the
+model. The first model initialization may download it to the faster-whisper cache.
+You can also browse to a local model directory. Audio recognition remains local;
+the optional `pyttsx3` TTS backend is enabled from Voice Setup.
 
 ### 3. Run JARVIS
 ```powershell
@@ -53,10 +52,12 @@ That's it! JARVIS will appear as an animated robot on your desktop.
 | Interaction panel | ✅ Click robot to open |
 | Demo command | ✅ Type "demo" in panel |
 | Settings dialog | ✅ Persistent JSON |
-| State animations | ✅ 7 visual states |
-| Task manager | ✅ Add and complete tasks in the panel |
-| Chat history | ✅ SQLite persistence (configurable) |
-| Push-to-talk | ✅ Optional local Whisper transcription |
+| State animations | ✅ State and special-effect animations |
+| Task manager | ✅ Separate active/completed views and persisted deadlines |
+| Chat history | ✅ Separate SQLite-backed conversations |
+| Push-to-talk | ✅ Optional local Whisper setup and transcription |
+| Reminders and alarms | ✅ Persistent scheduling with visible in-app notifications |
+| Editable behavior | ✅ User JSON configs for replies and allowlisted custom actions |
 
 ---
 
@@ -104,6 +105,25 @@ Open via: Right-click → Settings, or tray → Settings.
 
 Settings are saved to: `%APPDATA%\JARVIS\settings.json`
 
+### Behavior, AI routing, and reminder notes
+
+- Behavior & Responses in Settings opens the editable JSON files in
+  `%APPDATA%\JARVIS\config`. The application copies defaults there once and does
+  not overwrite customized files during updates.
+- The configurable AI Trigger Keyword (initially `Friday`) invokes the configured
+  AI provider for the remainder of the request. Unprefixed registered local
+  commands such as `Open Chrome` and `Remind me in 5 seconds` remain local actions.
+- Echo works offline; OpenAI and Google Gemini are selectable providers. Set the
+  API key in your Windows user environment under the variable name shown in
+  Settings (for example, `GEMINI_API_KEY`); JARVIS stores only the variable name,
+  never the secret. Gemini uses its REST API and requires no extra Python package.
+- Reminder/alarm definitions and wellness intervals persist in the local SQLite
+  store. Due notifications are delivered while JARVIS is running; reminders cannot
+  fire when the process is closed or the computer is powered off.
+- Utility dialogs use the robot's opacity and can be dragged from non-control
+  areas; buttons, text fields, lists, and other interactive controls keep their
+  normal click/edit behavior. The chat panel is unchanged.
+
 ---
 
 ## Project Structure
@@ -150,7 +170,7 @@ v1/
 python -m pytest jarvis/tests/ -v
 ```
 
-Current suite: **121 tests** ✅
+Current suite: **143 tests** ✅
 
 ---
 

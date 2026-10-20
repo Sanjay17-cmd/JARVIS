@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -54,13 +55,21 @@ class Settings:
             pass  # never let migration crash the app
 
     def save(self) -> None:
+        temporary = self._path.with_name(f".{self._path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            self._path.write_text(
+            temporary.write_text(
                 json.dumps(self._data, indent=2), encoding="utf-8"
             )
+            with temporary.open("r+b") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(self._path)
             log.info("Settings saved to %s", self._path)
         except Exception as exc:
             log.error("Could not save settings: %s", exc)
+            raise
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)

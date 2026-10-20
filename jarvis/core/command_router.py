@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+import random
 from datetime import datetime
 from typing import Callable
 
@@ -26,6 +27,10 @@ class CommandRouter:
         self._commands: dict[str, CommandHandler] = {}
         self._ai_fallback: CommandHandler | None = None
         self._ai_stream_fallback: Callable[[str, Callable[[str], None]], str] | None = None
+        self._ai_keywords: list[str] = []
+        self._custom_commands: list[dict] = []
+        self._custom_actions: dict[str, Callable[[dict], str]] = {}
+        self._responses: dict[str, list[str]] = {}
         # Launcher injected after construction via set_launcher()
         self._launcher = None
         self._register_builtins()
@@ -48,18 +53,146 @@ class CommandRouter:
 
     def has_builtin(self, text: str) -> bool:
         """Return whether this input resolves to a registered local command."""
-        return bool(text.strip()) and text.strip().lower().split()[0] in self._commands
+        try:
+            matches_custom = self._match_custom(text) is not None
+        except ValueError:
+            # Route ambiguous matches locally so the user receives an actionable error.
+            matches_custom = True
+        return (
+            bool(text.strip())
+            and not self._strip_ai_keyword(text)[1]
+            and (
+                text.strip().lower().split()[0] in self._commands
+                or matches_custom
+            )
+        )
+
+    def set_ai_keywords(self, keywords: list[str]) -> None:
+        self._ai_keywords = [self._normalize(item) for item in keywords if self._normalize(item)]
+
+    def set_responses(self, responses: dict[str, list[str]]) -> None:
+        self._responses = dict(responses)
+
+    def response(self, key: str, fallback: str, **values: str) -> str:
+        templates = self._responses.get(key)
+        if not templates:
+            return fallback.format(**values)
+        try:
+            return random.choice(templates).format(**values)
+        except (KeyError, ValueError) as exc:
+            log.error("Invalid response template '%s': %s", key, exc)
+            return fallback.format(**values)
+
+    def set_custom_commands(
+        self,
+        commands: list[dict],
+        actions: dict[str, Callable[[dict], str]],
+    ) -> None:
+        for command in commands:
+            if command.get("enabled", True):
+                action = command.get("action")
+                if action not in actions:
+                    raise ValueError(f"No registered action handler for '{action}'.")
+        self._custom_commands = list(commands)
+        self._custom_actions = actions
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        text = text.casefold().strip()
+        text = re.sub(r"[^\w\s]", " ", text)
+        return " ".join(text.split())
+
+    def _strip_ai_keyword(self, text: str) -> tuple[str, bool]:
+        normalized = text.strip()
+        for keyword in sorted(self._ai_keywords, key=len, reverse=True):
+            if re.match(rf"^{re.escape(keyword)}(?:\b|[,!:])", normalized, re.I):
+                query = re.sub(
+                    rf"^{re.escape(keyword)}\s*[,!:]?\s*",
+                    "",
+                    normalized,
+                    count=1,
+                    flags=re.I,
+                ).strip()
+                return query, True
+        return normalized, False
+
+    def _match_custom(self, text: str) -> dict | None:
+        normalized = self._normalize(text)
+        matches = [
+            command for command in self._custom_commands
+            if command.get("enabled", True)
+            and normalized in {
+                self._normalize(phrase)
+                for phrase in command.get("triggers", []) + command.get("aliases", [])
+            }
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                "This phrase matches multiple custom commands. "
+                "Give each command a distinct trigger."
+            )
+        return matches[0] if matches else None
+
+    def _route_local_or_custom(self, text: str) -> str | None:
+        custom = self._match_custom(text)
+        if custom is not None:
+            handler = self._custom_actions[custom["action"]]
+            result = handler(dict(custom.get("arguments", {})))
+            if result.startswith(("❌", "⚠")):
+                return result
+            reply = custom.get("reply")
+            if reply:
+                try:
+                    return reply.format(**custom.get("arguments", {}))
+                except (KeyError, ValueError) as exc:
+                    log.error("Invalid reply template for %s: %s", custom["id"], exc)
+            return result
+        key = text.strip().lower().split()[0] if text.strip() else ""
+        handler = self._commands.get(key)
+        if handler is None:
+            return None
+        try:
+            return handler(text)
+        except Exception as exc:
+            log.exception("Command '%s' failed", key)
+            return f"⚠ Error running '{key}': {exc}"
 
     def route_stream(self, text: str, on_chunk: Callable[[str], None]) -> str:
         """Route one command and forward response chunks as they become available."""
         text = text.strip()
         if not text:
             return ""
+        query, forced_ai = self._strip_ai_keyword(text)
+        if forced_ai:
+            if not query:
+                response = "Please add a question after the AI keyword."
+                on_chunk(response)
+                return response
+            if not self._ai_stream_fallback and not self._ai_fallback:
+                response = self.response(
+                    "ai_unavailable",
+                    "⚠ AI provider is unavailable. Local commands still work.",
+                )
+                on_chunk(response)
+                return response
+            try:
+                if self._ai_stream_fallback:
+                    return self._ai_stream_fallback(query, on_chunk)
+                response = self._ai_fallback(query)
+                on_chunk(response)
+                return response
+            except Exception as exc:
+                log.exception("AI request failed")
+                response = f"⚠ AI request failed: {exc}"
+                on_chunk(response)
+                return response
         key = text.lower().split()[0]
-        handler = self._commands.get(key)
         try:
-            if handler:
-                response = handler(text)
+            try:
+                response = self._route_local_or_custom(text)
+            except ValueError as exc:
+                return f"⚠ {exc}"
+            if response is not None:
                 if response:
                     on_chunk(response)
                 return response
@@ -85,21 +218,30 @@ class CommandRouter:
         text = text.strip()
         if not text:
             return ""
+        query, forced_ai = self._strip_ai_keyword(text)
+        if forced_ai:
+            if not query:
+                return "Please add a question after the AI keyword."
+            if self._ai_fallback:
+                return self._ai_fallback(query)
+            return self.response(
+                "ai_unavailable",
+                "⚠ AI provider is unavailable. Local commands still work.",
+            )
         key = text.lower().split()[0]
-        handler = self._commands.get(key)
-        if handler:
-            try:
-                return handler(text)
-            except Exception as exc:
-                log.exception("Command '%s' failed", key)
-                return f"⚠ Error running '{key}': {exc}"
+        try:
+            response = self._route_local_or_custom(text)
+        except ValueError as exc:
+            return f"⚠ {exc}"
+        if response is not None:
+            return response
 
         if self._ai_fallback:
             return self._ai_fallback(text)
 
-        return (
-            f"I don't recognise '{key}'. "
-            f"Try: {', '.join(sorted(self._commands.keys()))}"
+        return self.response(
+            "unsupported_command",
+            f"I don't recognise '{key}'. Try: {', '.join(sorted(self._commands.keys()))}",
         )
 
     # ── Built-in commands ─────────────────────────────────────────────────────
@@ -107,7 +249,10 @@ class CommandRouter:
     def _register_builtins(self) -> None:
 
         @self.register("hello")
-        def _(text): return "👋 Hello! I'm JARVIS v2, your desktop AI companion!"
+        def _(text):
+            return self.response(
+                "greeting", "👋 Hello! I'm JARVIS v2, your desktop AI companion!"
+            )
 
         @self.register("help")
         def _(text):
@@ -121,9 +266,12 @@ class CommandRouter:
         def _(text):
             return (
                 "🤖 Demo mode!\n"
-                "State cycle: THINKING → SUCCESS → IDLE.\n"
-                "Phase 2 adds voice, reminders, focus mode and app launching."
+                "State cycle: THINKING → SUCCESS → IDLE."
             )
+
+        @self.register("goodbye")
+        def _(text):
+            return self.response("goodbye", "Goodbye! I'll be here when you need me.")
 
         @self.register("version")
         def _(text):
@@ -152,7 +300,15 @@ class CommandRouter:
                 )
             app_name = parts[1].strip()
             if self._launcher:
-                return self._launcher.launch(app_name)
+                result = self._launcher.launch(app_name)
+                if result.startswith(("❌", "⚠")):
+                    return self.response(
+                        "app_open_failed", result,
+                        app_name=app_name, error=result,
+                    )
+                return self.response(
+                    "app_opened", result, app_name=app_name
+                )
             return f"🚀 Would open '{app_name}' (launcher not configured)."
 
         self._commands["open"]   = _open_handler
@@ -169,30 +325,30 @@ class CommandRouter:
         # ── Reminders (live, SQLite-backed) ───────────────────────────────
         @self.register("remind")
         def _(text):
-            # "remind me in 30 minutes to check code"
-            # "remind me tomorrow at 7pm to submit assignment"
             from jarvis.scheduling.reminder_service import (
                 add_reminder, parse_time_expression
             )
-            lower = text.lower()
-            # Strip the "remind me" prefix
-            body = re.sub(r"^remind\s+(me\s+)?", "", lower, flags=re.I).strip()
-
-            # Split on "to " — left side is time, right is title
+            body = re.sub(r"^remind(?:\s+me)?\s+", "", text, flags=re.I).strip()
             to_match = re.search(r"\bto\b(.+)$", body, re.I)
-            title = to_match.group(1).strip().capitalize() if to_match else body
+            title = to_match.group(1).strip().rstrip(".!?") if to_match else "Reminder"
             time_part = body[:to_match.start()].strip() if to_match else body
-
-            due = parse_time_expression(time_part or body)
+            due = parse_time_expression(time_part)
             if due is None:
                 return (
                     "⚠ I couldn't understand the time.\n"
-                    "Try: remind me in 30 minutes to check code\n"
-                    "     remind me tomorrow at 9am to submit assignment"
+                    "Try: remind me in 5 seconds to test the notification."
                 )
-            add_reminder(title or "Reminder", due)
+            try:
+                rid = add_reminder(title or "Reminder", due)
+            except Exception as exc:
+                log.exception("Reminder creation failed")
+                return f"⚠ Reminder was not saved: {exc}"
             from jarvis.scheduling.reminder_service import format_due
-            return f"✅ Reminder set: '{title}' — {format_due(due)}"
+            return self.response(
+                "reminder_created",
+                f"✅ Reminder #{rid} set: '{title}' — {format_due(due)}",
+                title=title,
+            )
 
         @self.register("reminder")
         def _(text): return self._commands["remind"](text)
@@ -224,6 +380,18 @@ class CommandRouter:
             add_alarm(title, due)
             return f"⏰ Alarm set: {format_due(due)}"
 
+        @self.register("set")
+        def _(text):
+            if re.match(r"^set\s+(?:an?\s+)?alarm\b", text, re.I):
+                body = re.sub(r"^set\s+(?:an?\s+)?alarm\s*", "", text, flags=re.I)
+                body = re.sub(r"^(?:in|for|at)\s+", "", body, flags=re.I)
+                return self._commands["alarm"](f"alarm {body}")
+            if re.match(r"^set\s+(?:a\s+)?reminder\b", text, re.I):
+                body = re.sub(r"^set\s+(?:a\s+)?reminder\s*", "", text, flags=re.I)
+                body = re.sub(r"^(?:in|for)\s+", "in ", body, flags=re.I)
+                return self._commands["remind"](f"remind me {body}")
+            return "Try: set a reminder for 1 minute to stretch, or set an alarm in 10 seconds."
+
         @self.register("alarms")
         def _(text):
             from jarvis.scheduling.reminder_service import get_alarms, format_due
@@ -243,7 +411,11 @@ class CommandRouter:
                 return "Usage: task <title>  (e.g. task finish the report)"
             from jarvis.scheduling.task_service import add_task
             add_task(body.capitalize())
-            return f"📋 Task added: '{body.capitalize()}'"
+            return self.response(
+                "task_created",
+                f"📋 Task added: '{body.capitalize()}'",
+                task_title=body.capitalize(),
+            )
 
         @self.register("tasks")
         def _(text):
@@ -262,9 +434,16 @@ class CommandRouter:
             parts = text.split()
             if len(parts) < 2 or not parts[1].isdigit():
                 return "Usage: done <task_id>  (see 'tasks' for IDs)"
-            from jarvis.scheduling.task_service import complete_task
-            complete_task(int(parts[1]))
-            return f"✅ Task {parts[1]} marked done!"
+            from jarvis.scheduling.task_service import complete_task, get_all_tasks
+            task_id = int(parts[1])
+            task = next((item for item in get_all_tasks() if item["id"] == task_id), None)
+            complete_task(task_id)
+            title = task["title"] if task else parts[1]
+            return self.response(
+                "task_completed",
+                f"✅ Task {parts[1]} marked done!",
+                task_title=title,
+            )
 
         # ── Focus stub ────────────────────────────────────────────────────────
 
