@@ -82,6 +82,7 @@ class JarvisApp:
         self._settings.set("safe_margin",    self._adv.get("safe_margin",    20))
         self._settings.set("animation_fps",  self._adv.get("animation_fps",  30))
         self._settings.set("tts_rate",       self._adv.get("tts_rate",       175))
+        self._settings.set("voice_model_path", self._adv.get("voice_model_path", ""))
 
         _setup_logging(self._settings.get("log_level", "INFO"))
         log.info("JARVIS v2.0.0 starting up…")
@@ -104,7 +105,8 @@ class JarvisApp:
         # ── Part J — AI provider ──────────────────────────────────────────
         from jarvis.ai.provider import get_provider
         self._ai_provider = get_provider(self._settings)
-        self._router.register_ai_fallback(self._ai_provider.ask)
+        stream_handler = getattr(self._ai_provider, "ask_stream", None)
+        self._router.register_ai_fallback(self._ai_provider.ask, stream_handler)
         log.info("AI provider: %s", self._ai_provider.name)
 
         # ── UI ────────────────────────────────────────────────────────────
@@ -119,6 +121,7 @@ class JarvisApp:
             self._event_bus,
             self._router,
             panels_always_on_top=panels_top,
+            settings=self._settings,
         )
         self._tray = TrayManager(
             self._state_manager, self._event_bus
@@ -126,6 +129,8 @@ class JarvisApp:
 
         # ── Signal wiring ─────────────────────────────────────────────────
         self._overlay.robot_clicked.connect(self._toggle_panel)
+        self._panel.open_tasks_requested.connect(self._open_tasks)
+        self._panel.voice_active_changed.connect(self.set_mic_active)
 
         self._tray.show_requested.connect(self._overlay.show)
         self._tray.hide_requested.connect(self._overlay.hide)
@@ -172,7 +177,7 @@ class JarvisApp:
             ),
         )
         # Wire focus commands to router
-        self._router._commands["focus"]      = lambda t: self._focus.start_focus()
+        self._router._commands["focus"]      = self._focus_command
         self._router._commands["focusstop"]  = lambda t: self._focus.stop()
         self._router._commands["focusskip"]  = lambda t: self._focus.skip_break()
         self._router._commands["focusstatus"]= lambda t: self._focus.status()
@@ -221,6 +226,8 @@ class JarvisApp:
             self._wellness.stop()
         if hasattr(self, "_focus"):
             self._focus.stop()
+        if hasattr(self, "_panel") and self._panel._voice is not None:
+            self._panel._voice.stop()
         from jarvis.scheduling import database as sched_db
         sched_db.close()
         self._overlay.stop()
@@ -272,6 +279,29 @@ class JarvisApp:
         )
         dlg.exec()
 
+    def _open_tasks(self) -> None:
+        from jarvis.ui.task_dialog import TaskDialog
+
+        dlg = TaskDialog(
+            panels_always_on_top=self._settings.get("panels_always_on_top", True),
+            parent=self._panel,
+        )
+        dlg.exec()
+
+    def _focus_command(self, text: str) -> str:
+        action = text.lower().split()[1:] or ["start"]
+        if action[0] in {"stop", "end"}:
+            return self._focus.stop()
+        if action[0] == "status":
+            return self._focus.status()
+        if action[0] in {"skip", "next"}:
+            return self._focus.skip_break()
+        if action[0] in {"start", "begin"}:
+            return self._focus.start_focus()
+        if action[0].isdigit():
+            return self._focus.start_focus(int(action[0]))
+        return "Usage: focus [minutes|start|stop|status|skip]"
+
     def _apply_settings(self) -> None:
         """Apply every changed setting to the live runtime immediately."""
         s = self._settings
@@ -289,12 +319,7 @@ class JarvisApp:
         self._overlay.set_auto_movement(s.get("auto_movement", True))
         self._overlay._speed = s.get("movement_speed", 1.2)
 
-        # 5. Animation
-        anim = s.get("animation_enabled", True)
-        if not anim and self._overlay._timer.isActive():
-            self._overlay._timer.stop()
-        elif anim and not self._overlay._timer.isActive():
-            self._overlay._timer.start()
+        # Animation is gated inside the shared timer so movement remains active.
 
         # 6. panels_always_on_top
         panels_top = s.get("panels_always_on_top", True)
@@ -309,6 +334,8 @@ class JarvisApp:
 
         # 8. Custom apps
         self._launcher.update_custom_apps(s.get("custom_apps", []))
+        if hasattr(self, "_wellness"):
+            self._wellness.refresh()
 
         log.info(
             "Settings applied — opacity=%.2f size=%d aot=%s move=%s panels_top=%s",
@@ -354,25 +381,29 @@ class JarvisApp:
     # ── Chest button handlers ─────────────────────────────────────────────
 
     def _chest_voice(self) -> None:
-        """Button 1 — Voice (Phase 2: show status, full impl in voice module)."""
-        self._overlay.show_status("🎤 Voice (coming in Phase 2)", 3000)
+        """Open the panel and toggle push-to-talk capture."""
         self._panel.show()
-        self._panel._input.setText("Voice mode not yet active — Phase 2")
+        self._panel.raise_()
+        self._panel.toggle_voice()
 
     def _chest_focus(self) -> None:
-        """Button 2 — Focus session toggle (Phase 2 stub)."""
-        self._overlay.show_status("🎯 Focus mode (coming in Phase 2)", 3000)
-        self._toggle_panel()
+        """Start or stop the Pomodoro focus session."""
+        if self._focus.is_active:
+            self._focus.stop()
+        else:
+            self._focus.start_focus()
 
     def _chest_reminders(self) -> None:
-        """Button 3 — Reminders panel (Phase 2 stub)."""
-        self._overlay.show_status("⏰ Reminders (coming in Phase 2)", 3000)
-        self._toggle_panel()
+        """Show reminder commands in the chat panel."""
+        self._panel.show()
+        self._panel.raise_()
+        self._panel.set_input_text("reminders")
 
     def _chest_quick_menu(self) -> None:
-        """Button 4 — Quick actions menu."""
-        self._overlay.show_status("⚡ Quick Actions", 2000)
-        self._toggle_panel()
+        """Open the panel's task manager and quick commands."""
+        self._panel.show()
+        self._panel.raise_()
+        self._open_tasks()
 
 
 def main() -> None:

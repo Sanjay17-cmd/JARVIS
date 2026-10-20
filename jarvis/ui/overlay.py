@@ -58,11 +58,37 @@ _BTN_DEFAULTS = [
 ]
 
 
+def _chest_button_hit_rects(size: int) -> list[QRect]:
+    """Return non-overlapping hit targets centered on the painted chest LEDs."""
+    from jarvis.assets.robot_painter import get_led_positions
+
+    offset = 10
+    positions = get_led_positions(size)
+    rects: list[QRect] = []
+    for index, (x, y, led_radius) in enumerate(positions):
+        spacing = (
+            positions[index + 1][0] - x
+            if index + 1 < len(positions)
+            else x - positions[index - 1][0]
+        )
+        radius = max(1, min(led_radius, spacing // 3))
+        rects.append(
+            QRect(
+                offset + x - radius,
+                offset + y - radius,
+                radius * 2 + 1,
+                radius * 2 + 1,
+            )
+        )
+    return rects
+
+
 # ── Background frame-generation worker ───────────────────────────────────────
 
 class _FrameWorker(QObject):
     """Runs PIL frame generation on a worker thread."""
-    finished = Signal(dict)   # emits {state_name: [QPixmap, …]}
+    finished = Signal(dict, int)   # emits frames and the generated size
+    failed = Signal(str, int)
 
     def __init__(self, images_dir, size: int) -> None:
         super().__init__()
@@ -71,18 +97,23 @@ class _FrameWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        from jarvis.assets.robot_painter import ensure_assets
-        pil_frames = ensure_assets(self._images_dir, size=self._size)
-        result: dict[str, list[QPixmap]] = {}
-        for state_name, imgs in pil_frames.items():
-            result[state_name] = []
-            for img in imgs:
-                buf = BytesIO()
-                img.save(buf, "PNG")
-                px = QPixmap()
-                px.loadFromData(buf.getvalue(), "PNG")
-                result[state_name].append(px)
-        self.finished.emit(result)
+        try:
+            from jarvis.assets.robot_painter import ensure_assets
+            pil_frames = ensure_assets(self._images_dir, size=self._size)
+            result: dict[str, list[QPixmap]] = {}
+            for state_name, imgs in pil_frames.items():
+                result[state_name] = []
+                for img in imgs:
+                    buf = BytesIO()
+                    img.save(buf, "PNG")
+                    px = QPixmap()
+                    if not px.loadFromData(buf.getvalue(), "PNG"):
+                        raise RuntimeError(f"Could not load generated {state_name} frame")
+                    result[state_name].append(px)
+            self.finished.emit(result, self._size)
+        except Exception as exc:
+            log.exception("Frame generation failed for size %d", self._size)
+            self.failed.emit(str(exc), self._size)
 
 
 # ── Chest button ─────────────────────────────────────────────────────────────
@@ -127,6 +158,10 @@ class RobotOverlay(QWidget):
         self._robot_size    = settings.get("robot_size", 120)
         self._frames: dict[str, list[QPixmap]] = {}
         self._frames_ready  = False
+        self._frame_gen_pending: int | None = None
+        self._running_frame_size: int | None = None
+        self._thread: QThread | None = None
+        self._worker: _FrameWorker | None = None
         self._current_state = RobotState.IDLE
         self._frame_index   = 0
         self._prev_frame_index = -1   # track changes to avoid redundant update()
@@ -201,24 +236,62 @@ class RobotOverlay(QWidget):
         from jarvis.assets import IMAGES_DIR
         self._frames_ready = False
         self._loading_label.setVisible(True)
+        if self._thread is not None and self._thread.isRunning():
+            self._frame_gen_pending = (
+                None if size == self._running_frame_size else size
+            )
+            return
+        self._frame_gen_pending = size
+        self._launch_frame_gen(IMAGES_DIR)
 
+    def _launch_frame_gen(self, images_dir) -> None:
+        size = self._frame_gen_pending
+        if size is None:
+            return
+        self._frame_gen_pending = None
+        self._running_frame_size = size
         self._thread = QThread(self)
-        self._worker = _FrameWorker(IMAGES_DIR, size)
+        self._worker = _FrameWorker(images_dir, size)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_frames_ready)
+        self._worker.failed.connect(self._on_frame_gen_failed)
         self._worker.finished.connect(self._thread.quit)
+        self._worker.failed.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.failed.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._on_frame_thread_finished)
         self._thread.start()
         log.info("Frame generation started in background (size=%d)…", size)
 
-    @Slot(dict)
-    def _on_frames_ready(self, frames: dict) -> None:
+    @Slot(dict, int)
+    def _on_frames_ready(self, frames: dict, size: int) -> None:
+        if size != self._robot_size:
+            return
         self._frames = frames
         self._frames_ready = True
         self._loading_label.setVisible(False)
         log.info("Frames loaded: %s", {k: len(v) for k, v in frames.items()})
         self._compute_button_rects()
         self.update()
+
+    @Slot(str, int)
+    def _on_frame_gen_failed(self, message: str, size: int) -> None:
+        if size == self._robot_size:
+            self._loading_label.setText("⚠ Robot artwork failed to load")
+            self._status_label.setText(message)
+            self._status_label.setVisible(True)
+
+    @Slot()
+    def _on_frame_thread_finished(self) -> None:
+        thread = self._thread
+        self._thread = None
+        self._worker = None
+        if thread is not None:
+            thread.deleteLater()
+        if self._frame_gen_pending is not None:
+            from jarvis.assets import IMAGES_DIR
+            self._launch_frame_gen(IMAGES_DIR)
 
     # ── Live robot resize (Part A) ────────────────────────────────────────────
 
@@ -229,6 +302,7 @@ class RobotOverlay(QWidget):
         self._robot_size = new_size
         self._win_size   = new_size + 40
         self.setFixedSize(self._win_size, self._win_size)
+        self.move(self._clamp_to_work(self.pos()))
         self._status_label.setGeometry(0, self._win_size - 24, self._win_size, 20)
         self._loading_label.setGeometry(0, 0, self._win_size, self._win_size)
         self._start_frame_gen(new_size)
@@ -281,31 +355,8 @@ class RobotOverlay(QWidget):
     # ── Chest button hit-rect ─────────────────────────────────────────────────
 
     def _compute_button_rects(self) -> None:
-        s   = self._robot_size
-        cx  = s // 2
-        pad = 20
-        ox, oy = pad // 2, pad // 2
-
-        head_h  = int(s * 0.38)
-        head_y0 = int(s * 0.14)
-        neck_h  = int(s * 0.06)
-        body_w  = int(s * 0.62)
-        body_h  = int(s * 0.32)
-        body_x0 = cx - body_w // 2
-        body_y0 = head_y0 + head_h + neck_h
-
-        cp_w  = int(body_w * 0.55)
-        cp_h  = int(body_h * 0.48)
-        cp_x  = cx - cp_w // 2
-        cp_y  = body_y0 + int(body_h * 0.18)
-
-        led_r   = max(5, s // 20)
-        spacing = cp_w // 5
-        ly      = cp_y + cp_h // 2
-
-        for i, btn in enumerate(self._buttons):
-            lx = cp_x + spacing * (i + 1)
-            btn.rect = QRect(ox+lx-led_r, oy+ly-led_r, led_r*2, led_r*2)
+        for btn, rect in zip(self._buttons, _chest_button_hit_rects(self._robot_size)):
+            btn.rect = rect
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -317,7 +368,7 @@ class RobotOverlay(QWidget):
 
     def stop(self) -> None:
         self._timer.stop()
-        if hasattr(self, "_thread") and self._thread.isRunning():
+        if self._thread is not None and self._thread.isRunning():
             self._thread.quit()
             self._thread.wait(2000)
 

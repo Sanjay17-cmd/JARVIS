@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "animations": {
+    "idle": {"enabled": true, "speed": 1.0},
+    "wave": {"enabled": true, "speed": 1.0},
+    "fly": {"enabled": true, "speed": 1.0},
+    "repair": {"enabled": true, "speed": 1.0},
+    "scan": {"enabled": true, "speed": 1.0},
+    "typing": {"enabled": true, "speed": 1.0},
+    "thirsty": {"enabled": true, "speed": 1.0},
+    "focus": {"enabled": true, "speed": 1.0},
+    "alarm": {"enabled": true, "speed": 1.0},
+    "confused": {"enabled": true, "speed": 1.0}
+  }
+}

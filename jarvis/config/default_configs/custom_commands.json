@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "id": "show-open-tasks",
+      "name": "Show open tasks",
+      "description": "List unfinished tasks",
+      "triggers": ["show my tasks", "list open tasks"],
+      "aliases": ["open tasks"],
+      "action": "show_tasks",
+      "arguments": {},
+      "reply": "Here are your open tasks.",
+      "enabled": true
+    },
+    {
+      "id": "show-completed-tasks",
+      "name": "Show completed tasks",
+      "description": "Open the completed tasks view",
+      "triggers": ["show completed tasks"],
+      "aliases": [],
+      "action": "show_completed_tasks",
+      "arguments": {},
+      "reply": "Opening completed tasks.",
+      "enabled": true
+    }
+  ]
+}

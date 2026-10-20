@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "responses": {
+    "greeting": ["Hello! How can I help?", "Hi there. What can I do for you?"],
+    "goodbye": ["Goodbye! I'll be here when you need me.", "See you soon."],
+    "listening": ["Listening."],
+    "thinking": ["Let me think."],
+    "speaking": ["Here's what I found."],
+    "app_opened": ["Opening {app_name}."],
+    "app_open_failed": ["I couldn't open {app_name}: {error}"],
+    "reminder_created": ["Reminder set: {title}."],
+    "reminder_triggered": ["Reminder: {title}."],
+    "reminder_dismissed": ["Dismissed reminder: {title}."],
+    "reminder_snoozed": ["Snoozed {title} for {minutes} minutes."],
+    "task_created": ["Added task: {task_title}."],
+    "task_completed": ["Completed task: {task_title}."],
+    "focus_started": ["Focus mode started for {minutes} minutes."],
+    "focus_stopped": ["Focus mode stopped."],
+    "unsupported_command": ["I don't recognize that command."],
+    "ai_unavailable": ["AI is unavailable. You can still use local commands."],
+    "voice_unavailable": ["Voice is unavailable: {error}"]
+  }
+}

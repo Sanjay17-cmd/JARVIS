@@ -81,6 +81,15 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         completed_at    REAL    DEFAULT NULL,
         recurrence      TEXT    DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS conversation_messages (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        role        TEXT    NOT NULL CHECK (role IN ('user', 'assistant')),
+        content     TEXT    NOT NULL,
+        created_at  REAL    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_created
+        ON conversation_messages(created_at, id);
     """)
     conn.commit()
 
@@ -107,3 +116,33 @@ def executemany(sql: str, params_list: list) -> None:
 def commit() -> None:
     with _lock:
         get_conn().commit()
+
+
+def save_conversation_message(role: str, content: str, created_at: float) -> None:
+    if role not in {"user", "assistant"}:
+        raise ValueError(f"Unsupported conversation role: {role}")
+    with _lock:
+        conn = get_conn()
+        conn.execute(
+            "INSERT INTO conversation_messages (role, content, created_at) "
+            "VALUES (?, ?, ?)",
+            (role, content, created_at),
+        )
+        conn.execute(
+            "DELETE FROM conversation_messages WHERE id NOT IN "
+            "(SELECT id FROM conversation_messages ORDER BY id DESC LIMIT 2000)"
+        )
+        conn.commit()
+
+
+def load_conversation_history(limit: int = 200) -> list[dict]:
+    if limit < 1:
+        raise ValueError("Conversation history limit must be positive")
+    with _lock:
+        rows = get_conn().execute(
+            "SELECT role, content, created_at FROM "
+            "(SELECT id, role, content, created_at FROM conversation_messages "
+            "ORDER BY id DESC LIMIT ?) ORDER BY id",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]

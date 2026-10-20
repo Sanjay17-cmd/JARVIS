@@ -15,7 +15,7 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QObject
 from PySide6.QtGui import QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
@@ -23,6 +23,28 @@ from PySide6.QtWidgets import (
 )
 
 from jarvis.core.state import RobotState
+
+
+class _CommandWorker(QObject):
+    chunk = Signal(str)
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, router, text: str) -> None:
+        super().__init__()
+        self._router = router
+        self._text = text
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.completed.emit(
+                self._router.route_stream(self._text, self.chunk.emit)
+            )
+        except Exception as exc:
+            log.exception("Command worker failed")
+            self.failed.emit(str(exc))
+
 
 if TYPE_CHECKING:
     from jarvis.core.state import StateManager
@@ -144,6 +166,8 @@ class InteractionPanel(QWidget):
 
     command_issued   = Signal(str)
     close_requested  = Signal()
+    open_tasks_requested = Signal()
+    voice_active_changed = Signal(bool)
 
     def __init__(
         self,
@@ -152,13 +176,21 @@ class InteractionPanel(QWidget):
         router: "CommandRouter",
         panels_always_on_top: bool = True,
         parent: QWidget | None = None,
+        settings=None,
     ) -> None:
         super().__init__(parent)
         self._state_manager = state_manager
         self._event_bus     = event_bus
         self._router        = router
+        self._settings      = settings
         self._dragging      = False
         self._drag_offset   = None
+        self._command_thread: QThread | None = None
+        self._command_worker: _CommandWorker | None = None
+        self._cancelled = False
+        self._stream_bubble: _MessageBubble | None = None
+        self._streamed_response = ""
+        self._stream_timestamp = ""
 
         self.setObjectName("InteractionPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -170,7 +202,15 @@ class InteractionPanel(QWidget):
         self.apply_topmost(panels_always_on_top)
 
         self._build_ui()
+        self._voice = None
+        if settings is not None:
+            from jarvis.voice import VoiceController
+            self._voice = VoiceController(settings, self)
+            self._voice.listening_changed.connect(self._on_voice_state)
+            self._voice.transcription_ready.connect(self._on_transcription)
+            self._voice.error.connect(self._on_voice_error)
         state_manager.add_listener(self._on_state_change)
+        self._restore_history()
 
     # ── topmost control (called live from app when setting changes) ───────
 
@@ -265,6 +305,15 @@ class InteractionPanel(QWidget):
         self._btn_send.setFixedWidth(58)
         self._btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_send.clicked.connect(self._on_send)
+        self._btn_mic = QPushButton("Mic")
+        self._btn_mic.setFixedWidth(42)
+        self._btn_mic.setToolTip("Start or stop local push-to-talk")
+        self._btn_mic.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_mic.clicked.connect(self.toggle_voice)
+        self._btn_tasks = QPushButton("Tasks")
+        self._btn_tasks.setFixedWidth(54)
+        self._btn_tasks.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_tasks.clicked.connect(self.open_tasks_requested)
         self._btn_cancel = QPushButton("✕")
         self._btn_cancel.setObjectName("cancel_btn")
         self._btn_cancel.setFixedWidth(32)
@@ -272,6 +321,8 @@ class InteractionPanel(QWidget):
         self._btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_cancel.clicked.connect(self._on_cancel)
         input_row.addWidget(self._input)
+        input_row.addWidget(self._btn_mic)
+        input_row.addWidget(self._btn_tasks)
         input_row.addWidget(self._btn_send)
         input_row.addWidget(self._btn_cancel)
         root.addLayout(input_row)
@@ -285,12 +336,6 @@ class InteractionPanel(QWidget):
         root.addWidget(hint)
 
         # Welcome message
-        self._add_message(
-            "👋 Hi! I'm JARVIS v2. Type a command to get started.\n"
-            "Try: demo, help, status, version",
-            is_user=False,
-        )
-
     # ── Drag-to-move via title bar ────────────────────────────────────────
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -312,8 +357,15 @@ class InteractionPanel(QWidget):
 
     # ── Message helpers ───────────────────────────────────────────────────
 
-    def _add_message(self, text: str, is_user: bool = True) -> None:
-        ts = datetime.now().strftime("%H:%M")
+    def _add_message(
+        self,
+        text: str,
+        is_user: bool = True,
+        *,
+        persist: bool = True,
+        timestamp: str | None = None,
+    ) -> _MessageBubble:
+        ts = timestamp or datetime.now().strftime("%H:%M")
         bubble = _MessageBubble(text, is_user=is_user, timestamp=ts)
         count = self._msg_layout.count()
         self._msg_layout.insertWidget(count - 1, bubble)
@@ -323,11 +375,54 @@ class InteractionPanel(QWidget):
                 self._scroll.verticalScrollBar().maximum()
             ),
         )
+        if persist and self._settings is not None and self._settings.get(
+            "retain_conversation", True
+        ):
+            self._persist_message("user" if is_user else "assistant", text)
+        return bubble
+
+    def _persist_message(self, role: str, text: str) -> None:
+        from time import time
+        from jarvis.scheduling.database import save_conversation_message
+
+        try:
+            save_conversation_message(role, text, time())
+        except Exception as exc:
+            log.exception("Could not save conversation history")
+            self._lbl_status.setText(f"⚠ Conversation history could not be saved: {exc}")
+            self._lbl_status.setVisible(True)
+
+    def _restore_history(self) -> None:
+        if self._settings is not None and self._settings.get("retain_conversation", True):
+            try:
+                from jarvis.scheduling.database import load_conversation_history
+
+                for item in load_conversation_history():
+                    timestamp = datetime.fromtimestamp(item["created_at"]).strftime("%H:%M")
+                    self._add_message(
+                        item["content"],
+                        is_user=item["role"] == "user",
+                        persist=False,
+                        timestamp=timestamp,
+                    )
+                if self._msg_layout.count() > 1:
+                    return
+            except Exception as exc:
+                log.exception("Could not load conversation history")
+                self._lbl_status.setText(f"⚠ Conversation history could not be loaded: {exc}")
+                self._lbl_status.setVisible(True)
+        self._add_message(
+            "👋 Hi! I'm JARVIS v2. Type a command to get started.\n"
+            "Try: demo, help, status, version",
+            is_user=False,
+            persist=False,
+        )
 
     def _set_busy(self, busy: bool) -> None:
         self._input.setEnabled(not busy)
         self._btn_send.setEnabled(not busy)
         self._btn_cancel.setVisible(busy)
+        self._btn_cancel.setEnabled(True)
         if busy:
             self._lbl_status.setText("⏳ Processing…")
             self._lbl_status.setVisible(True)
@@ -338,6 +433,8 @@ class InteractionPanel(QWidget):
 
     @Slot()
     def _on_send(self) -> None:
+        if self._command_thread is not None:
+            return
         text = self._input.text().strip()
         if not text:
             return
@@ -345,26 +442,132 @@ class InteractionPanel(QWidget):
         self._add_message(text, is_user=True)
         self._set_busy(True)
         self._state_manager.transition(RobotState.THINKING)
-
-        # Route synchronously (Phase 2: non-blocking worker comes in Part C)
-        response = self._router.route(text)
-
-        if text.lower().startswith("demo"):
-            self._state_manager.transition(RobotState.SUCCESS)
-            QTimer.singleShot(2000, lambda: self._state_manager.transition(RobotState.IDLE))
-        else:
-            self._state_manager.transition(RobotState.SUCCESS)
-            QTimer.singleShot(1500, lambda: self._state_manager.transition(RobotState.IDLE))
-
-        self._add_message(response, is_user=False)
-        self._set_busy(False)
+        self._cancelled = False
+        self._stream_bubble = None
+        self._streamed_response = ""
+        self._stream_timestamp = datetime.now().strftime("%H:%M")
         self.command_issued.emit(text)
+        if self._router.has_builtin(text):
+            response = self._router.route(text)
+            self._on_response_chunk(response)
+            self._on_command_completed(response)
+            self._set_busy(False)
+            return
+
+        thread = QThread(self)
+        worker = _CommandWorker(self._router, text)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.chunk.connect(self._on_response_chunk)
+        worker.completed.connect(self._on_command_completed)
+        worker.failed.connect(self._on_command_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(self._on_command_thread_finished)
+        self._command_thread = thread
+        self._command_worker = worker
+        thread.start()
+
+    @Slot(str)
+    def _on_response_chunk(self, chunk: str) -> None:
+        if self._cancelled or not chunk:
+            return
+        self._streamed_response += chunk
+        if self._stream_bubble is None:
+            self._stream_bubble = self._add_message(
+                "",
+                is_user=False,
+                persist=False,
+                timestamp=self._stream_timestamp,
+            )
+        self._stream_bubble.setText(
+            f"{self._streamed_response}  [{self._stream_timestamp}]"
+        )
+
+    @Slot(str)
+    def _on_command_completed(self, response: str) -> None:
+        if self._cancelled:
+            return
+        if self._stream_bubble is None:
+            self._stream_bubble = self._add_message(
+                response,
+                is_user=False,
+                persist=False,
+                timestamp=self._stream_timestamp,
+            )
+        else:
+            self._stream_bubble.setText(
+                f"{response}  [{self._stream_timestamp}]"
+            )
+        if self._settings is not None and self._settings.get("retain_conversation", True):
+            self._persist_message("assistant", response)
+        self._state_manager.transition(RobotState.SUCCESS)
+        if self._voice is not None:
+            self._voice.speak(response)
+        QTimer.singleShot(1500, lambda: self._state_manager.transition(RobotState.IDLE))
+
+    @Slot(str)
+    def _on_command_failed(self, message: str) -> None:
+        self._add_message(f"⚠ Command failed: {message}", is_user=False)
+        self._state_manager.transition(RobotState.ERROR)
+        QTimer.singleShot(1500, lambda: self._state_manager.transition(RobotState.IDLE))
+
+    @Slot()
+    def _on_command_thread_finished(self) -> None:
+        thread = self._command_thread
+        self._command_thread = None
+        self._command_worker = None
+        if thread is not None:
+            thread.deleteLater()
+        self._set_busy(False)
+        if self._cancelled:
+            self._state_manager.transition(RobotState.IDLE)
+            self._add_message("⚠ Response cancelled.", is_user=False)
 
     @Slot()
     def _on_cancel(self) -> None:
-        self._set_busy(False)
-        self._state_manager.transition(RobotState.IDLE)
-        self._add_message("⚠ Cancelled.", is_user=False)
+        if self._command_thread is None:
+            return
+        self._cancelled = True
+        self._btn_cancel.setEnabled(False)
+        self._lbl_status.setText("Stopping response…")
+        self._lbl_status.setVisible(True)
+
+    def set_input_text(self, text: str) -> None:
+        self._input.setText(text)
+        self._input.setFocus()
+
+    def toggle_voice(self) -> None:
+        if self._voice is None:
+            self._on_voice_error("Voice settings are not available.")
+        elif self._voice.is_listening:
+            self._voice.stop_listening()
+        else:
+            self._voice.start_listening()
+
+    @Slot(bool)
+    def _on_voice_state(self, active: bool) -> None:
+        self._btn_mic.setText("Stop" if active else "Mic")
+        self._btn_mic.setStyleSheet(
+            "QPushButton{background:#a02030;}" if active else ""
+        )
+        self.voice_active_changed.emit(active)
+        if active:
+            self._lbl_status.setText("🎤 Listening — click Stop when finished.")
+            self._lbl_status.setVisible(True)
+        elif self._lbl_status.text().startswith("🎤"):
+            self._lbl_status.setVisible(False)
+
+    @Slot(str)
+    def _on_transcription(self, text: str) -> None:
+        self._input.setText(text)
+        self._on_send()
+
+    @Slot(str)
+    def _on_voice_error(self, message: str) -> None:
+        self._add_message(f"⚠ Voice: {message}", is_user=False)
 
     # ── State indicator ───────────────────────────────────────────────────
 

@@ -65,3 +65,26 @@ def test_ai_fallback_called_for_unknown(router):
     result = router.route("what is the meaning of life")
     assert called_with[0].startswith("what")
     assert result == "AI reply"
+
+
+def test_route_stream_forwards_builtin_response(router):
+    chunks = []
+    result = router.route_stream("hello", chunks.append)
+    assert result == "".join(chunks)
+    assert "JARVIS" in result
+    assert router.has_builtin("hello")
+    assert not router.has_builtin("not-a-command")
+
+
+def test_route_stream_forwards_ai_chunks(router):
+    chunks = []
+
+    def stream_reply(text, on_chunk):
+        on_chunk("AI ")
+        on_chunk("reply")
+        return "AI reply"
+
+    router.register_ai_fallback(lambda text: "AI reply", stream_reply)
+    result = router.route_stream("question", chunks.append)
+    assert result == "AI reply"
+    assert chunks == ["AI ", "reply"]

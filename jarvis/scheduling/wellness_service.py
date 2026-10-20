@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 _WELLNESS_ITEMS = [
     {
         "key":      "hydration",
+        "enabled_key": "wellness_hydration_enabled",
         "adv_key":  "wellness_hydration_interval",
         "icon":     "💧",
         "title":    "Hydration reminder",
@@ -32,6 +33,7 @@ _WELLNESS_ITEMS = [
     },
     {
         "key":      "stretch",
+        "enabled_key": "wellness_stretch_enabled",
         "adv_key":  "wellness_stretch_interval",
         "icon":     "🧘",
         "title":    "Stretch break",
@@ -40,6 +42,7 @@ _WELLNESS_ITEMS = [
     },
     {
         "key":      "eyerest",
+        "enabled_key": "wellness_eyerest_enabled",
         "adv_key":  "wellness_eyerest_interval",
         "icon":     "👁",
         "title":    "Eye rest — 20-20-20",
@@ -79,7 +82,8 @@ class WellnessService(QObject):
             log.info("Wellness reminders disabled.")
             return
         for item in _WELLNESS_ITEMS:
-            self._create_timer(item)
+            if self._s.get(item["enabled_key"], True):
+                self._create_timer(item)
         log.info("Wellness service started (%d timers).", len(self._timers))
 
     def stop(self) -> None:

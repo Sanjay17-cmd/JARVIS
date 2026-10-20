@@ -13,7 +13,7 @@ import logging
 from enum import Enum, auto
 from typing import Callable, TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 if TYPE_CHECKING:
     from jarvis.config.settings import Settings
@@ -51,6 +51,9 @@ class FocusService(QObject):
         self._tick_timer.setInterval(1000)
         self._tick_timer.timeout.connect(self._on_tick)
 
+        self._nudge_timer = QTimer(self)
+        self._nudge_timer.timeout.connect(self._send_distraction_nudge)
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     @property
@@ -61,10 +64,16 @@ class FocusService(QObject):
     def is_active(self) -> bool:
         return self._state != FocusState.IDLE
 
-    def start_focus(self) -> str:
+    def start_focus(self, duration_minutes: int | None = None) -> str:
         if self._state == FocusState.FOCUSING:
             return "⚡ Already in focus mode!"
-        dur = self._adv.get("focus_duration_minutes", 25)
+        dur = (
+            duration_minutes
+            if duration_minutes is not None
+            else self._adv.get("focus_duration_minutes", 25)
+        )
+        if not 1 <= dur <= 240:
+            return "⚠ Focus duration must be between 1 and 240 minutes."
         self._enter(FocusState.FOCUSING, dur * 60)
         return f"🎯 Focus session started — {dur} minutes. You've got this!"
 
@@ -97,6 +106,7 @@ class FocusService(QObject):
     def _enter(self, new_state: FocusState, seconds: int) -> None:
         self._phase_timer.stop()
         self._tick_timer.stop()
+        self._nudge_timer.stop()
         self._state     = new_state
         self._remaining = seconds
         self.state_changed.emit(new_state.name)
@@ -104,6 +114,11 @@ class FocusService(QObject):
         if new_state != FocusState.IDLE:
             self._phase_timer.start(seconds * 1000)
             self._tick_timer.start()
+        if new_state == FocusState.FOCUSING and self._s.get(
+            "focus_distraction_nudge", False
+        ):
+            cooldown = self._adv.get("focus_nudge_cooldown_minutes", 10)
+            self._nudge_timer.start(int(cooldown * 60 * 1000))
 
         # Chest indicator: green when focusing
         if self._on_indicator:
@@ -123,6 +138,14 @@ class FocusService(QObject):
             notify("✅", "Focus ended", "Session complete. Well done!", duration_ms=4000)
 
         log.info("Focus state → %s (%d s)", new_state.name, seconds)
+
+    @Slot()
+    def _send_distraction_nudge(self) -> None:
+        if self._state != FocusState.FOCUSING:
+            return
+        from jarvis.ui.notification import notify
+
+        notify("🎯", "Focus check-in", "Stay with your current task; take a break when the timer ends.")
 
     def _phase_done(self) -> None:
         if self._state == FocusState.FOCUSING:

@@ -18,7 +18,7 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from jarvis.config.settings import Settings
@@ -71,6 +71,11 @@ class EchoProvider(AIProvider):
             f"Set OPENAI_API_KEY and ai_provider=openai in Settings to enable AI."
         )
 
+    def ask_stream(self, text: str, on_chunk: Callable[[str], None]) -> str:
+        response = self.ask(text)
+        on_chunk(response)
+        return response
+
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 
@@ -109,8 +114,12 @@ class OpenAIProvider(AIProvider):
         return f"openai/{self._model}"
 
     def ask(self, text: str) -> str:
+        chunks: list[str] = []
+        return self.ask_stream(text, chunks.append)
+
+    def ask_stream(self, text: str, on_chunk: Callable[[str], None]) -> str:
         if self._client is None:
-            return EchoProvider().ask(text)
+            return EchoProvider().ask_stream(text, on_chunk)
         try:
             t0 = time.monotonic()
             resp = self._client.chat.completions.create(
@@ -120,14 +129,23 @@ class OpenAIProvider(AIProvider):
                     {"role": "user",    "content": text},
                 ],
                 max_tokens=200,
+                stream=True,
             )
             elapsed = time.monotonic() - t0
-            reply   = resp.choices[0].message.content.strip()
+            parts: list[str] = []
+            for event in resp:
+                content = event.choices[0].delta.content
+                if content:
+                    parts.append(content)
+                    on_chunk(content)
+            reply = "".join(parts).strip()
             log.debug("OpenAI %.2fs: %s", elapsed, reply[:80])
             return reply
         except Exception as exc:
             log.warning("OpenAI error: %s", exc)
-            return f"⚠ AI error: {exc}"
+            message = f"⚠ AI error: {exc}"
+            on_chunk(message)
+            return message
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────

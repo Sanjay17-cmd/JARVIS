@@ -25,6 +25,7 @@ class CommandRouter:
     def __init__(self) -> None:
         self._commands: dict[str, CommandHandler] = {}
         self._ai_fallback: CommandHandler | None = None
+        self._ai_stream_fallback: Callable[[str, Callable[[str], None]], str] | None = None
         # Launcher injected after construction via set_launcher()
         self._launcher = None
         self._register_builtins()
@@ -37,8 +38,42 @@ class CommandRouter:
             return fn
         return decorator
 
-    def register_ai_fallback(self, handler: CommandHandler) -> None:
+    def register_ai_fallback(
+        self,
+        handler: CommandHandler,
+        stream_handler: Callable[[str, Callable[[str], None]], str] | None = None,
+    ) -> None:
         self._ai_fallback = handler
+        self._ai_stream_fallback = stream_handler
+
+    def has_builtin(self, text: str) -> bool:
+        """Return whether this input resolves to a registered local command."""
+        return bool(text.strip()) and text.strip().lower().split()[0] in self._commands
+
+    def route_stream(self, text: str, on_chunk: Callable[[str], None]) -> str:
+        """Route one command and forward response chunks as they become available."""
+        text = text.strip()
+        if not text:
+            return ""
+        key = text.lower().split()[0]
+        handler = self._commands.get(key)
+        try:
+            if handler:
+                response = handler(text)
+                if response:
+                    on_chunk(response)
+                return response
+            if self._ai_stream_fallback:
+                return self._ai_stream_fallback(text, on_chunk)
+            response = self._ai_fallback(text) if self._ai_fallback else self.route(text)
+            if response:
+                on_chunk(response)
+            return response
+        except Exception as exc:
+            log.exception("Streaming command '%s' failed", key)
+            response = f"⚠ Error running '{key}': {exc}"
+            on_chunk(response)
+            return response
 
     def set_launcher(self, launcher) -> None:
         """Inject the WindowsAppLauncher after construction."""
@@ -235,11 +270,11 @@ class CommandRouter:
 
         @self.register("focus")
         def _(text):
-            return "🎯 Focus mode coming in Phase 2! (Pomodoro timer + distraction nudges)"
+            return "🎯 Focus controls: focus start, focus stop, focus status, focus skip."
 
         # ── Wellness stub ─────────────────────────────────────────────────────
         @self.register("hydration")
-        def _(text): return "💧 Hydration reminders coming in Phase 2!"
+        def _(text): return "💧 Hydration reminders run automatically when Wellness is enabled in Settings."
 
         # ── System ────────────────────────────────────────────────────────────
         @self.register("pause")

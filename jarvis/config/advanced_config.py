@@ -48,6 +48,7 @@ ADVANCED_SCHEMA: dict[str, tuple[Any, Any, Any, str]] = {
     # [voice]
     "tts_rate":               (175,  50,  400,  "TTS speech rate in words per minute (50–400)"),
     "tts_volume":             (0.9,  0.0, 1.0,  "TTS volume 0.0–1.0"),
+    "voice_model_path":       ("",   None, None, "Path to a downloaded local faster-whisper model directory"),
     # [ai]
     "ai_timeout":             (30,   5,   300,  "AI provider request timeout in seconds (5–300)"),
     # [system]
@@ -65,7 +66,7 @@ _SECTIONS = {
     "quiet_hours":  ["quiet_hour_start", "quiet_hour_end"],
     "focus":        ["focus_duration_minutes", "focus_short_break_minutes",
                      "focus_long_break_minutes", "focus_nudge_cooldown_minutes"],
-    "voice":        ["tts_rate", "tts_volume"],
+    "voice":        ["tts_rate", "tts_volume", "voice_model_path"],
     "ai":           ["ai_timeout"],
     "system":       ["log_level", "camera_index"],
 }

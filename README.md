@@ -22,6 +22,14 @@
 pip install -r requirements.txt
 ```
 
+### Optional local voice
+The app stays lightweight and works without speech packages. For local push-to-talk,
+install `sounddevice` and `faster-whisper`, download a faster-whisper model yourself,
+then set `voice_model_path` in `%APPDATA%\JARVIS\advanced_settings.ini` to that
+local model directory. JARVIS does not download models or send microphone audio to
+an online service. Enable `tts_enabled` in `%APPDATA%\JARVIS\settings.json` to use
+optional `pyttsx3` speech output.
+
 ### 3. Run JARVIS
 ```powershell
 python main.py
@@ -46,6 +54,9 @@ That's it! JARVIS will appear as an animated robot on your desktop.
 | Demo command | ✅ Type "demo" in panel |
 | Settings dialog | ✅ Persistent JSON |
 | State animations | ✅ 7 visual states |
+| Task manager | ✅ Add and complete tasks in the panel |
+| Chat history | ✅ SQLite persistence (configurable) |
+| Push-to-talk | ✅ Optional local Whisper transcription |
 
 ---
 
@@ -61,9 +72,14 @@ Opens the interaction panel. Type commands:
 | `status` | System status |
 | `help` | List all commands |
 | `version` | Version info |
+| `task <title>` | Add a task |
+| `tasks` / `done <id>` | List or complete tasks |
+| `focus start/stop/status/skip` | Control a Pomodoro session |
+| `remind me in 30 minutes to ...` | Add a reminder |
 
 ### Right-click the robot
 Opens the context menu with: Open Panel, Pause, Reset Position, Settings, Hide, Exit.
+The chest buttons toggle push-to-talk and focus, open reminders, and open the task manager.
 
 ### System Tray
 Look for the **J** icon in the system tray (bottom-right). 
@@ -113,7 +129,7 @@ v1/
     ├── config/
     │   ├── defaults.py        # Default settings
     │   └── settings.py        # JSON persistence
-    ├── voice/                 # Phase 2 stub
+    ├── voice/                 # Optional local speech recognition and TTS
     ├── vision/                # Phase 3 stub
     ├── ai/                    # Phase 4 stub
     ├── actions/               # Action registry
@@ -134,7 +150,7 @@ v1/
 python -m pytest jarvis/tests/ -v
 ```
 
-Expected: **33 passed** ✅
+Current suite: **121 tests** ✅
 
 ---
 
@@ -159,13 +175,9 @@ Log files: `%APPDATA%\JARVIS\logs\jarvis.log`
 
 ## Future Roadmap
 
-### Phase 2 — Voice First
-- Wake-word detection via sherpa-onnx
-- Speech recognition (local, no cloud)
-- Text-to-speech response
-- Live microphone indicator
-
-### Phase 3 — Computer Vision
+### Later phases
+- Wake-word detection and broader local speech-engine support
+- Computer vision
 - OpenCV webcam capture
 - MediaPipe hand landmark tracking
 - Static + dynamic gesture recognition

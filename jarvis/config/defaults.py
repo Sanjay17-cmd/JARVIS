@@ -41,6 +41,7 @@ DEFAULTS: dict[str, Any] = {
     "voice_enabled":        False,
     "voice_wake_word":      "jarvis",
     "voice_language":       "en-US",
+    "voice_model_path":     "",          # local faster-whisper model directory
     "tts_enabled":          False,
     "tts_voice":            "",          # empty = system default
     "tts_rate":             175,         # words per minute
