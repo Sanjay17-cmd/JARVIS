@@ -26,15 +26,19 @@ DEFAULTS: dict[str, Any] = {
     # ── Notifications ───────────────────────────────────────────────────────
     "notifications_enabled": True,
     "notification_duration": 5000,       # ms  1000–30000
+    "notification_reminders": True,
+    "notification_alarms": True,
+    "notification_focus": True,
+    "notification_wellness": True,
     "sound_enabled":         False,      # Phase 2+
     "sound_volume":          0.7,        # 0.0–1.0
 
     # ── Chest buttons ────────────────────────────────────────────────────────
     "chest_buttons": [
-        {"id": 0, "name": "Voice",      "action": "toggle_voice",    "color": "#00dcff", "enabled": True,  "shortcut": "", "confirm": False},
-        {"id": 1, "name": "Focus",      "action": "toggle_focus",    "color": "#00ff96", "enabled": True,  "shortcut": "", "confirm": False},
-        {"id": 2, "name": "Reminders",  "action": "open_reminders",  "color": "#ffc800", "enabled": True,  "shortcut": "", "confirm": False},
-        {"id": 3, "name": "Actions",    "action": "open_quick_menu", "color": "#ff6400", "enabled": True,  "shortcut": "", "confirm": False},
+        {"id": 0, "name": "Voice",      "action": "toggle_voice",    "color": "#B84DFF", "enabled": True,  "shortcut": "", "confirm": False},
+        {"id": 1, "name": "Focus",      "action": "toggle_focus",    "color": "#2878FF", "enabled": True,  "shortcut": "", "confirm": False},
+        {"id": 2, "name": "Reminders",  "action": "open_reminders",  "color": "#FFB000", "enabled": True,  "shortcut": "", "confirm": False},
+        {"id": 3, "name": "Actions",    "action": "open_quick_menu", "color": "#FF4FA3", "enabled": True,  "shortcut": "", "confirm": False},
     ],
 
     # ── Voice ────────────────────────────────────────────────────────────────
@@ -57,8 +61,32 @@ DEFAULTS: dict[str, Any] = {
 
     # ── AI provider ──────────────────────────────────────────────────────────
     "ai_provider":          "none",      # "none"|"openai"|"anthropic"
+    "ai_primary_provider":  "gemini",
+    "ai_primary_model":     "gemini-2.5-flash",
+    "ai_primary_credential_id": "",
+    "ai_credentials":       [],
+    "ai_provider_enabled":  {
+        "gemini": True, "openrouter": True, "grok": True, "openai": True,
+    },
+    "ai_fallback_enabled":  True,
+    "ai_fallback_routes":  [],
+    "ai_max_fallback_attempts": 3,
+    "ai_max_retries":       1,
+    "ai_retry_wait_cap_seconds": 5,
+    "ai_max_output_tokens": 512,
+    "ai_recent_message_count": 8,
+    "ai_context_max_chars": 12000,
+    "ai_cache_enabled":     True,
+    "ai_cache_expiry_minutes": 60,
+    "ai_cache_policy_version": 1,
+    "ai_summary_threshold": 30,
+    "ai_summary_recent_messages": 12,
+    "ai_advanced_route_enabled": False,
+    "ai_advanced_model":    "",
+    "ai_free_models_only":  False,
+    "ai_model_catalog_ttl_seconds": 3600,
     "ai_model":             "",
-    "ai_api_key_env_var":   "JARVIS_AI_API_KEY",
+    "ai_api_key_env_var":   "",
     "ai_timeout":           30,          # seconds
     "ai_trigger_enabled":   True,
     "ai_trigger_keyword":   "Friday",

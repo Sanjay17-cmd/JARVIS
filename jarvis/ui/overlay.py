@@ -51,10 +51,10 @@ STATE_LABELS = {
 }
 
 _BTN_DEFAULTS = [
-    {"id": 0, "name": "Voice",     "action": "toggle_voice",    "color": "#00dcff"},
-    {"id": 1, "name": "Focus",     "action": "toggle_focus",    "color": "#00ff96"},
-    {"id": 2, "name": "Reminders", "action": "open_reminders",  "color": "#ffc800"},
-    {"id": 3, "name": "Actions",   "action": "open_quick_menu", "color": "#ff6400"},
+    {"id": 0, "name": "Voice",     "action": "toggle_voice",    "color": "#B84DFF"},
+    {"id": 1, "name": "Focus",     "action": "toggle_focus",    "color": "#2878FF"},
+    {"id": 2, "name": "Reminders", "action": "open_reminders",  "color": "#FFB000"},
+    {"id": 3, "name": "Actions",   "action": "open_quick_menu", "color": "#FF4FA3"},
 ]
 
 
@@ -184,9 +184,10 @@ class RobotOverlay(QWidget):
 
         # Window setup
         flags = (Qt.WindowType.FramelessWindowHint
-                 | Qt.WindowType.WindowStaysOnTopHint
                  | Qt.WindowType.Tool
                  | Qt.WindowType.NoDropShadowWindowHint)
+        if settings.get("always_on_top", True):
+            flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
@@ -204,6 +205,7 @@ class RobotOverlay(QWidget):
             "QLabel{color:rgba(0,220,255,230);font-size:11px;"
             "font-family:'Segoe UI',Arial;background:rgba(5,15,35,180);"
             "border-radius:8px;padding:2px 6px;}")
+        self._status_label.setWordWrap(True)
         self._status_label.setVisible(False)
         self._status_label.setGeometry(0, self._win_size - 24, self._win_size, 20)
 
@@ -403,11 +405,16 @@ class RobotOverlay(QWidget):
             self._pick_new_target()
 
     def set_always_on_top(self, on: bool) -> None:
+        if self.isVisible():
+            from jarvis.platform.windows_window import set_topmost_in_place
+            if set_topmost_in_place(int(self.winId()), on):
+                return
         f = self.windowFlags()
         f = (f | Qt.WindowType.WindowStaysOnTopHint) if on \
             else (f & ~Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowFlags(f)
-        self.show()
+        if self.isVisible():
+            self.show()
 
     def reset_position(self) -> None:
         wr = self._work_rect()
@@ -421,9 +428,36 @@ class RobotOverlay(QWidget):
         else:
             self._hide_status()
 
+    def show_reminder_bubble(
+        self, title: str, description: str = "", duration_ms: int = 8000
+    ) -> None:
+        message = f"🔔 Reminder: {title}"
+        self._status_label.setText(message)
+        self._status_label.setToolTip(
+            f"{message}\n{description}" if description else message
+        )
+        self._status_label.setStyleSheet(
+            "QLabel{color:#fff4d6;font-size:11px;font-weight:bold;"
+            "font-family:'Segoe UI',Arial;background:rgba(88,42,0,235);"
+            "border:1px solid #ffb000;border-radius:10px;padding:4px 8px;}"
+        )
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_label.setGeometry(
+            6, self._win_size - 42, self._win_size - 12, 36
+        )
+        self._status_label.setVisible(True)
+        self._status_hide_timer.start(duration_ms)
+
     @Slot()
     def _hide_status(self) -> None:
         self._status_label.setVisible(False)
+        self._status_label.setToolTip("")
+        self._status_label.setStyleSheet(
+            "QLabel{color:rgba(0,220,255,230);font-size:11px;"
+            "font-family:'Segoe UI',Arial;background:rgba(5,15,35,180);"
+            "border-radius:8px;padding:2px 6px;}"
+        )
+        self._status_label.setGeometry(0, self._win_size - 24, self._win_size, 20)
 
     # ── SINGLE master tick (animation + movement combined) ────────────────────
 

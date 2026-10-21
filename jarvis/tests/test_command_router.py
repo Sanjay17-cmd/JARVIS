@@ -102,6 +102,16 @@ def test_configured_ai_keyword_strips_prefix_and_forces_ai(router):
     assert not router.has_builtin("Friday, hello")
 
 
+def test_all_configured_trigger_aliases_force_ai_before_local_commands(router):
+    calls = []
+    router.set_ai_keywords(["Friday", "Susanth"])
+    router.register_ai_fallback(lambda text: calls.append(text) or "AI response")
+
+    assert router.route("Friday, hello") == "AI response"
+    assert router.route("sUsAnTh: hello") == "AI response"
+    assert calls == ["hello", "hello"]
+
+
 def test_custom_command_normalizes_punctuation_and_whitespace(router):
     invoked = []
     router.set_custom_commands(
@@ -147,6 +157,16 @@ def test_response_templates_are_applied_to_builtin_interactions(router):
     })
     assert router.route("hello") == "Welcome back!"
     assert router.route("unsupported_phrase") == "No match for this request."
+
+
+def test_router_reports_when_a_builtin_response_uses_predefined_text(router):
+    router.set_responses({"greeting": ["Welcome back!"]})
+
+    assert router.route("hello") == "Welcome back!"
+    assert router.last_response_is_predefined is True
+
+    router.route("status")
+    assert router.last_response_is_predefined is False
 
 
 def test_ambiguous_custom_trigger_returns_actionable_error(router):

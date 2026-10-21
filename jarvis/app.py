@@ -19,6 +19,11 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtWidgets import QApplication
 
+# Load project-local secrets before provider instances are constructed.
+# Existing process/user environment variables take precedence over .env values.
+from jarvis.config.api_keys import load_api_environment
+load_api_environment(Path(__file__).resolve().parent.parent / ".env")
+
 # ── logging setup (must run before importing jarvis modules) ────────────────
 
 def _setup_logging(level: str = "INFO") -> None:
@@ -117,8 +122,6 @@ class JarvisApp:
         self._camera_active = False
 
         # ── Part J — AI provider ──────────────────────────────────────────
-        from jarvis.ai.provider import get_provider
-        self._ai_provider_factory = get_provider
         self._configure_ai_provider()
 
         # ── UI ────────────────────────────────────────────────────────────
@@ -135,6 +138,7 @@ class JarvisApp:
             panels_always_on_top=panels_top,
             settings=self._settings,
         )
+        self._voice_chat_window = None
         self._tray = TrayManager(
             self._state_manager, self._event_bus
         )
@@ -174,6 +178,7 @@ class JarvisApp:
         # ── Notification queue (Part I) ───────────────────────────────────
         from jarvis.ui.notification import NotificationQueue
         self._notif_queue = NotificationQueue.instance()
+        self._notif_queue.configure(self._settings, self._overlay)
 
         # ── Wellness service (Part F) ─────────────────────────────────────
         from jarvis.scheduling.wellness_service import WellnessService
@@ -185,7 +190,7 @@ class JarvisApp:
         self._focus = FocusService(
             self._settings, self._adv,
             on_indicator=lambda active: self._overlay.set_chest_indicator(
-                1, "#00ff60" if active else None
+                1, "#00FF75" if active else None
             ),
         )
         # Wire focus commands to router
@@ -256,6 +261,11 @@ class JarvisApp:
                         or "drink" in title.casefold()
                         else "success"
                     )
+                notification_category = (
+                    "wellness" if source_key.startswith("wellness:")
+                    else "alarms" if ev_type == "alarm"
+                    else "reminders"
+                )
                 notify(
                     icon, title, ev.get("description", ""),
                     duration_ms=30000,
@@ -264,10 +274,25 @@ class JarvisApp:
                         ("Snooze 5 minutes", snooze),
                         ("Dismiss", lambda i=item_id, t=ev_type: self._dismiss_due_item(t, i)),
                     ],
+                    category=notification_category,
                 )
+                category_setting = {
+                    "wellness": "notification_wellness",
+                    "alarms": "notification_alarms",
+                    "reminders": "notification_reminders",
+                }[notification_category]
+                if (
+                    self._settings.get("notifications_enabled", True)
+                    and self._settings.get(category_setting, True)
+                ):
+                    self._panel.add_reminder_message(
+                        title, ev.get("description", "")
+                    )
                 self._overlay.play_animation(animation, duration_ms=6000)
                 # Overlay status bar
-                self._overlay.show_status(f"{icon} {title}", 6000)
+                self._overlay.show_reminder_bubble(
+                    title, ev.get("description", ""), duration_ms=8000
+                )
                 # Chest indicator (Part K)
                 self.set_reminder_due(True)
                 from PySide6.QtCore import QTimer as _T
@@ -333,6 +358,7 @@ class JarvisApp:
             router=self._router,
             voice_controller=self._panel._voice,
             overlay=self._overlay,
+            ai_gateway=self._ai_gateway,
             parent=None,
         )
         dlg.settings_changed.connect(self._apply_settings)
@@ -396,10 +422,21 @@ class JarvisApp:
         ]
 
     def _configure_ai_provider(self) -> None:
-        self._ai_provider = self._ai_provider_factory(self._settings)
-        stream_handler = getattr(self._ai_provider, "ask_stream", None)
-        self._router.register_ai_fallback(self._ai_provider.ask, stream_handler)
-        log.info("AI provider: %s", self._ai_provider.name)
+        from jarvis.ai.gateway import AIGateway
+
+        if not hasattr(self, "_ai_gateway"):
+            self._ai_gateway = AIGateway(self._settings)
+        self._router.register_ai_fallback(
+            self._ai_gateway.generate,
+            lambda prompt, on_chunk: self._ai_gateway.generate(prompt, on_chunk),
+            lambda prompt, on_chunk, cancel_event, on_reset: self._ai_gateway.generate(
+                prompt, on_chunk, cancel_event, on_reset
+            ),
+        )
+        log.info(
+            "AI gateway configured for primary provider: %s",
+            self._settings.get("ai_primary_provider", "gemini"),
+        )
 
     def _register_custom_actions(self) -> None:
         import time
@@ -574,32 +611,40 @@ class JarvisApp:
     # ── Part K — Mic / Camera chest indicators ────────────────────────────
 
     def set_mic_active(self, active: bool) -> None:
-        """Called by voice service. Button 0 = cyan idle, green active, red muted."""
+        """Button 0 is purple at rest, cyan while listening, and red when muted."""
         self._mic_active = active
-        color = "#00ff60" if active else None   # green=on, reset=idle-cyan
+        color = "#00FFFF" if active else None
         self._overlay.set_chest_indicator(0, color)
 
     def set_mic_muted(self, muted: bool) -> None:
-        color = "#ff3030" if muted else None
+        color = "#FF1744" if muted else None
         self._overlay.set_chest_indicator(0, color)
 
     def set_camera_active(self, active: bool) -> None:
-        """Future: called by camera/vision service. Button 1 indicator."""
+        """Future: called by camera/vision service. Button 1 is Focus blue."""
         self._camera_active = active
-        color = "#00ff60" if active else None
+        color = "#00FF75" if active else None
         self._overlay.set_chest_indicator(1, color)
 
     def set_reminder_due(self, has_due: bool) -> None:
-        """Button 2 flashes amber when a reminder is due."""
-        color = "#ff9900" if has_due else None
+        """Button 2 turns bright red-orange while a reminder is due."""
+        color = "#FF3D00" if has_due else None
         self._overlay.set_chest_indicator(2, color)
 
     # ── Chest button handlers ─────────────────────────────────────────────
 
     def _chest_voice(self) -> None:
-        """Open the panel and toggle push-to-talk capture."""
-        self._panel.show()
-        self._panel.raise_()
+        """Use the robot chest button to start voice chat without opening main chat."""
+        if self._voice_chat_window is None:
+            from jarvis.ui.voice_chat_dialog import VoiceChatDialog
+
+            self._panel.new_chat()
+            self._voice_chat_window = VoiceChatDialog(
+                self._panel, self._settings, parent=None
+            )
+        self._voice_chat_window.show()
+        self._voice_chat_window.raise_()
+        self._voice_chat_window.activateWindow()
         self._panel.toggle_voice()
 
     def _chest_focus(self) -> None:

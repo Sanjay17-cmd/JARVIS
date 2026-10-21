@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import random
+from threading import Event
 from datetime import datetime
 from typing import Callable
 
@@ -27,10 +28,14 @@ class CommandRouter:
         self._commands: dict[str, CommandHandler] = {}
         self._ai_fallback: CommandHandler | None = None
         self._ai_stream_fallback: Callable[[str, Callable[[str], None]], str] | None = None
+        self._ai_cancelable_stream_fallback: (
+            Callable[[str, Callable[[str], None], Event | None, Callable[[], None] | None], str] | None
+        ) = None
         self._ai_keywords: list[str] = []
         self._custom_commands: list[dict] = []
         self._custom_actions: dict[str, Callable[[dict], str]] = {}
         self._responses: dict[str, list[str]] = {}
+        self._last_response_is_predefined = False
         # Launcher injected after construction via set_launcher()
         self._launcher = None
         self._register_builtins()
@@ -47,9 +52,13 @@ class CommandRouter:
         self,
         handler: CommandHandler,
         stream_handler: Callable[[str, Callable[[str], None]], str] | None = None,
+        cancelable_stream_handler: (
+            Callable[[str, Callable[[str], None], Event | None, Callable[[], None] | None], str] | None
+        ) = None,
     ) -> None:
         self._ai_fallback = handler
         self._ai_stream_fallback = stream_handler
+        self._ai_cancelable_stream_fallback = cancelable_stream_handler
 
     def has_builtin(self, text: str) -> bool:
         """Return whether this input resolves to a registered local command."""
@@ -74,6 +83,7 @@ class CommandRouter:
         self._responses = dict(responses)
 
     def response(self, key: str, fallback: str, **values: str) -> str:
+        self._last_response_is_predefined = True
         templates = self._responses.get(key)
         if not templates:
             return fallback.format(**values)
@@ -82,6 +92,10 @@ class CommandRouter:
         except (KeyError, ValueError) as exc:
             log.error("Invalid response template '%s': %s", key, exc)
             return fallback.format(**values)
+
+    @property
+    def last_response_is_predefined(self) -> bool:
+        return self._last_response_is_predefined
 
     def set_custom_commands(
         self,
@@ -157,7 +171,13 @@ class CommandRouter:
             log.exception("Command '%s' failed", key)
             return f"⚠ Error running '{key}': {exc}"
 
-    def route_stream(self, text: str, on_chunk: Callable[[str], None]) -> str:
+    def route_stream(
+        self,
+        text: str,
+        on_chunk: Callable[[str], None],
+        cancel_event: Event | None = None,
+        on_reset: Callable[[], None] | None = None,
+    ) -> str:
         """Route one command and forward response chunks as they become available."""
         text = text.strip()
         if not text:
@@ -168,7 +188,11 @@ class CommandRouter:
                 response = "Please add a question after the AI keyword."
                 on_chunk(response)
                 return response
-            if not self._ai_stream_fallback and not self._ai_fallback:
+            if not (
+                self._ai_cancelable_stream_fallback
+                or self._ai_stream_fallback
+                or self._ai_fallback
+            ):
                 response = self.response(
                     "ai_unavailable",
                     "⚠ AI provider is unavailable. Local commands still work.",
@@ -176,6 +200,10 @@ class CommandRouter:
                 on_chunk(response)
                 return response
             try:
+                if self._ai_cancelable_stream_fallback:
+                    return self._ai_cancelable_stream_fallback(
+                        query, on_chunk, cancel_event, on_reset
+                    )
                 if self._ai_stream_fallback:
                     return self._ai_stream_fallback(query, on_chunk)
                 response = self._ai_fallback(query)
@@ -196,6 +224,10 @@ class CommandRouter:
                 if response:
                     on_chunk(response)
                 return response
+            if self._ai_cancelable_stream_fallback:
+                return self._ai_cancelable_stream_fallback(
+                    text, on_chunk, cancel_event, on_reset
+                )
             if self._ai_stream_fallback:
                 return self._ai_stream_fallback(text, on_chunk)
             response = self._ai_fallback(text) if self._ai_fallback else self.route(text)
@@ -215,6 +247,7 @@ class CommandRouter:
     # ── Routing ──────────────────────────────────────────────────────────────
 
     def route(self, text: str) -> str:
+        self._last_response_is_predefined = False
         text = text.strip()
         if not text:
             return ""

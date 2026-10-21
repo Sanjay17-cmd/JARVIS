@@ -38,6 +38,25 @@ class VoiceSetupDialog(QDialog):
         self._enabled.toggled.connect(self._save_settings)
         layout.addWidget(self._enabled)
 
+        self._tts_enabled = QCheckBox("Speak every assistant response")
+        self._tts_enabled.setChecked(bool(settings.get("tts_enabled", False)))
+        self._tts_enabled.toggled.connect(self._save_tts_settings)
+        layout.addWidget(self._tts_enabled)
+        layout.addWidget(QLabel("Speech voice:"))
+        self._tts_voice = QComboBox()
+        self._tts_voice.addItem("System default", "")
+        try:
+            for voice_id, name in self._voice.output_voices():
+                self._tts_voice.addItem(name, voice_id)
+        except Exception as exc:
+            self._tts_voice.setToolTip(f"Could not enumerate system voices: {exc}")
+        current_voice = str(settings.get("tts_voice", ""))
+        voice_index = self._tts_voice.findData(current_voice)
+        if voice_index >= 0:
+            self._tts_voice.setCurrentIndex(voice_index)
+        self._tts_voice.currentIndexChanged.connect(self._save_tts_settings)
+        layout.addWidget(self._tts_voice)
+
         layout.addWidget(QLabel("Recognition model (base.en is the CPU-friendly default):"))
         self._model = QComboBox()
         self._model.setEditable(True)
@@ -117,6 +136,11 @@ class VoiceSetupDialog(QDialog):
     def _save_settings(self, *_args) -> None:
         self._settings.set("voice_enabled", self._enabled.isChecked())
         self._settings.set("voice_microphone_id", int(self._microphone.currentData()))
+        self._settings.save()
+
+    def _save_tts_settings(self, *_args) -> None:
+        self._settings.set("tts_enabled", self._tts_enabled.isChecked())
+        self._settings.set("tts_voice", str(self._tts_voice.currentData() or ""))
         self._settings.save()
 
     def _save_model(self, value: str) -> None:

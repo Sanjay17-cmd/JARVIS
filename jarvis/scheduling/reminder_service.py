@@ -180,7 +180,14 @@ def get_upcoming_reminders(limit: int = 10) -> list[dict]:
 
 
 def complete_reminder(rid: int) -> None:
+    row = db.execute("SELECT task_id FROM reminders WHERE id=?", (rid,)).fetchone()
     db.execute("UPDATE reminders SET completed=1,status='completed' WHERE id=?", (rid,))
+    if row and row["task_id"]:
+        db.execute(
+            "UPDATE tasks SET status='done',completed_at=COALESCE(completed_at,?) "
+            "WHERE id=?",
+            (_now(), int(row["task_id"])),
+        )
     db.commit()
 
 def snooze_reminder(rid: int, minutes: int = 10, seconds: int | None = None) -> None:

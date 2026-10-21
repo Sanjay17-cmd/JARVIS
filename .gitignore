@@ -49,6 +49,9 @@ jarvis/assets/images/
 # Do NOT commit settings or logs
 *.log
 settings.json
+.env
+.env.*
+!.env.example
 
 # Windows
 Thumbs.db

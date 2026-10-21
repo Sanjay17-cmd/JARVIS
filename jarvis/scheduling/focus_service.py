@@ -167,15 +167,15 @@ class FocusService(QObject):
             from jarvis.ui.notification import notify
             if new_state == FocusState.FOCUSING:
                 dur = seconds // 60
-                notify("🎯", "Focus session", f"Focusing for {dur} minutes. Stay locked in!", duration_ms=5000)
+                notify("🎯", "Focus session", f"Focusing for {dur} minutes. Stay locked in!", duration_ms=5000, category="focus")
             elif new_state == FocusState.SHORT_BREAK:
                 dur = seconds // 60
-                notify("☕", "Short break", f"Take a {dur}-minute break. Rest your eyes.", duration_ms=5000)
+                notify("☕", "Short break", f"Take a {dur}-minute break. Rest your eyes.", duration_ms=5000, category="focus")
             elif new_state == FocusState.LONG_BREAK:
                 dur = seconds // 60
-                notify("🛋", "Long break", f"Great work! Take a {dur}-minute long break.", duration_ms=6000)
+                notify("🛋", "Long break", f"Great work! Take a {dur}-minute long break.", duration_ms=6000, category="focus")
             elif new_state == FocusState.IDLE:
-                notify("✅", "Focus ended", "Session complete. Well done!", duration_ms=4000)
+                notify("✅", "Focus ended", "Session complete. Well done!", duration_ms=4000, category="focus")
 
         log.info("Focus state → %s (%d s)", new_state.name, seconds)
 
@@ -236,6 +236,7 @@ class FocusService(QObject):
                 ("Pause Focus", self.pause),
                 ("Always allow", lambda: self._allow_app(matched)),
             ],
+            category="focus",
         )
 
     @staticmethod

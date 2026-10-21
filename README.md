@@ -80,7 +80,10 @@ Opens the interaction panel. Type commands:
 
 ### Right-click the robot
 Opens the context menu with: Open Panel, Pause, Reset Position, Settings, Hide, Exit.
-The chest buttons toggle push-to-talk and focus, open reminders, and open the task manager.
+The chest microphone button opens a separate voice-chat window and starts/stops
+push-to-talk without opening the main interaction panel. Use **New Chat** or the
+conversation selector to start a conversation or return to an older one. The
+other chest buttons control focus, open reminders, and open the task manager.
 
 ### System Tray
 Look for the **J** icon in the system tray (bottom-right). 
@@ -91,6 +94,22 @@ Right-click for: Show, Hide, Pause/Resume, Settings, Exit.
 ## Settings
 
 Open via: Right-click → Settings, or tray → Settings.
+
+Settings are grouped under the top section bar. **AI & Voice** includes the
+trigger words, AI provider controls, voice output enablement, and installed
+speech-voice selection. The chat panel can speak assistant replies from either
+typed or voice input, including local command responses, when voice output is
+enabled.
+
+**Notifications** provides a master toggle and category switches for reminders,
+alarms, focus, wellness, and other notifications. Due reminders can also appear
+in the chat. Desktop notification toasts appear in the bottom-right; the robot
+shows a reminder bubble with a matching animation.
+
+The settings window's bottom scrolling legend explains chest-button colors:
+purple for Voice, blue for Focus, amber for Reminders, and pink for Actions.
+Status colors are cyan while listening, red while muted or when a reminder is
+due, and green while Focus is active.
 
 | Setting | Description |
 |---|---|
@@ -113,10 +132,31 @@ Settings are saved to: `%APPDATA%\JARVIS\settings.json`
 - The configurable AI Trigger Keyword (initially `Friday`) invokes the configured
   AI provider for the remainder of the request. Unprefixed registered local
   commands such as `Open Chrome` and `Remind me in 5 seconds` remain local actions.
-- Echo works offline; OpenAI and Google Gemini are selectable providers. Set the
-  API key in your Windows user environment under the variable name shown in
-  Settings (for example, `GEMINI_API_KEY`); JARVIS stores only the variable name,
-  never the secret. Gemini uses its REST API and requires no extra Python package.
+- Open **AI Pipeline Settings** to configure Gemini, OpenRouter, and xAI Grok.
+  Refresh the provider's model catalogue to see account-available models; OpenRouter
+  models can be filtered to free entries. Configure ordered fallbacks, retry/timeout
+  limits, context size, cache retention, summaries, and saved user-approved memory.
+- Existing OpenAI settings are migrated through the same gateway for compatibility;
+  OpenAI is shown in the provider list only for a migrated legacy configuration.
+- Add API keys in **Credentials**. Stored keys use Windows Credential Manager;
+  only labels, provider/project metadata, and credential IDs are saved in Settings.
+  Alternatively, copy `.env.example` to `.env` and set `GEMINI_API_KEY`,
+  `OPENROUTER_API_KEY`, or `XAI_API_KEY`. The local `.env` is ignored by Git.
+- AI results and summaries are stored in the local SQLite database. Eligible exact
+  responses are cached with context-aware keys; time-sensitive/current-information
+  prompts are excluded. Cached answers are not live provider checks.
+- All model-generated text is kept separate from local application actions. AI
+  output does not execute shell commands. Search is not claimed unless the provider
+  integration actually performs a configured search.
+- Manual provider integration checklist: add a key for each provider; use **Test
+  Connection**; refresh models and select an available model; send one ordinary
+  prompt and verify provider/model status; configure a fallback and test with a
+  deliberately unavailable model; verify rate-limit/quota behavior with an account
+  where safe. Mocked tests cannot validate real credentials, project quota policy,
+  billing, or current catalogue availability.
+- The settings window is split into General, Notifications, AI & Voice, and
+  Focus & Tools sections. Installed TTS voices are listed by the local Windows
+  speech backend; availability depends on voices installed on that PC.
 - Reminder/alarm definitions and wellness intervals persist in the local SQLite
   store. Due notifications are delivered while JARVIS is running; reminders cannot
   fire when the process is closed or the computer is powered off.
@@ -151,7 +191,7 @@ v1/
     │   └── settings.py        # JSON persistence
     ├── voice/                 # Optional local speech recognition and TTS
     ├── vision/                # Phase 3 stub
-    ├── ai/                    # Phase 4 stub
+    ├── ai/                    # Unified provider gateway, adapters, cache and memory
     ├── actions/               # Action registry
     ├── plugins/               # Phase 5 stub
     ├── memory/                # SQLite stub
@@ -170,13 +210,24 @@ v1/
 python -m pytest jarvis/tests/ -v
 ```
 
-Current suite: **143 tests** ✅
+The suite includes unit and mocked integration tests for providers, routing,
+persistence, and user interface behavior.
 
 ---
 
 ## Logs
 
 Log files: `%APPDATA%\JARVIS\logs\jarvis.log`
+
+## Packaging and portability
+
+The current `JARVIS.spec` uses PyInstaller's `COLLECT` mode and produces an
+**onedir distribution**, not a single portable EXE. It has not been built or
+validated as a distributable package. A build also needs the referenced asset
+folders and icon to exist, and optional speech recognition/model resources may
+need separate setup. API credentials are stored in the Windows Credential
+Manager and do not automatically transfer to another PC; configure credentials
+there after installation. Do not package API keys in the executable.
 
 ---
 
@@ -203,16 +254,8 @@ Log files: `%APPDATA%\JARVIS\logs\jarvis.log`
 - Static + dynamic gesture recognition
 - Gesture-to-command mappings
 
-### Phase 4 — AI Integration
-- OpenAI / Anthropic provider
-- Streaming responses
-- Local LLM support
-- AI output sandboxing (action registry)
-
 ### Phase 5 — Plugins & Memory
 - Plugin discovery system
-- SQLite command history
-- User-defined memories
 - Custom gesture plugins
 
 ---

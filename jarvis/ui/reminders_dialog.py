@@ -273,5 +273,5 @@ class RemindersDialog(QDialog):
     def _test_notification(self) -> None:
         from jarvis.ui.notification import notify
 
-        notify("🔔", "JARVIS test notification", "Notifications are working.", duration_ms=5000)
+        notify("🔔", "JARVIS test notification", "Notifications are working.", duration_ms=5000, category="reminders")
         self._status.setText("Test notification displayed.")

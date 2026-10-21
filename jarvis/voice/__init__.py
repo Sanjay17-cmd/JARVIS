@@ -119,6 +119,7 @@ class VoiceController(QObject):
     def __init__(self, settings, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
+        self._tts_lock = threading.Lock()
         self._thread: QThread | None = None
         self._worker: _CaptureWorker | None = None
         self._setup_thread: QThread | None = None
@@ -310,15 +311,33 @@ class VoiceController(QObject):
             daemon=True,
         ).start()
 
-    def _speak_blocking(self, text: str) -> None:
-        try:
-            import pyttsx3
+    @staticmethod
+    def output_voices() -> list[tuple[str, str]]:
+        """Return installed system speech voices as (voice ID, display name)."""
+        import pyttsx3
 
-            engine = pyttsx3.init()
-            engine.setProperty("rate", int(self._settings.get("tts_rate", 175)))
-            engine.setProperty("volume", float(self._settings.get("tts_volume", 0.9)))
-            engine.say(text)
-            engine.runAndWait()
-        except Exception as exc:
-            log.exception("Text-to-speech failed")
-            self.error.emit(f"Text-to-speech failed: {exc}")
+        engine = pyttsx3.init()
+        try:
+            return [
+                (str(voice.id), str(voice.name))
+                for voice in engine.getProperty("voices")
+            ]
+        finally:
+            engine.stop()
+
+    def _speak_blocking(self, text: str) -> None:
+        with self._tts_lock:
+            try:
+                import pyttsx3
+
+                engine = pyttsx3.init()
+                engine.setProperty("rate", int(self._settings.get("tts_rate", 175)))
+                engine.setProperty("volume", float(self._settings.get("tts_volume", 0.9)))
+                voice_id = str(self._settings.get("tts_voice", ""))
+                if voice_id:
+                    engine.setProperty("voice", voice_id)
+                engine.say(text)
+                engine.runAndWait()
+            except Exception as exc:
+                log.exception("Text-to-speech failed")
+                self.error.emit(f"Text-to-speech failed: {exc}")

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget,
     QLabel, QSlider, QCheckBox, QSpinBox, QLineEdit,
     QPushButton, QFormLayout, QFrame, QScrollArea, QComboBox,
+    QTabWidget,
 )
 if TYPE_CHECKING:
     from jarvis.config.settings import Settings
@@ -60,6 +61,7 @@ class SettingsDialog(QDialog):
                  router=None,
                  voice_controller=None,
                  overlay=None,
+                 ai_gateway=None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._s = settings
@@ -67,6 +69,7 @@ class SettingsDialog(QDialog):
         self._router = router
         self._voice = voice_controller
         self._overlay = overlay
+        self._ai_gateway = ai_gateway
         self._drag_offset: QPoint | None = None
         self._dragging = False
         self.setWindowFlags(
@@ -128,9 +131,19 @@ class SettingsDialog(QDialog):
         bl.setContentsMargins(18, 14, 18, 14)
         bl.setSpacing(10)
 
-        form = QFormLayout()
-        form.setSpacing(12)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self._sections = QTabWidget()
+        self._section_forms = {}
+        for title in ("General", "Notifications", "AI & Voice", "Focus & Tools"):
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_form = QFormLayout()
+            page_form.setSpacing(12)
+            page_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+            page_layout.addLayout(page_form)
+            page_layout.addStretch()
+            self._sections.addTab(page, title)
+            self._section_forms[title] = page_form
+        form = self._section_forms["General"]
 
         # 1. Opacity
         self._op = QSlider(Qt.Orientation.Horizontal)
@@ -167,9 +180,23 @@ class SettingsDialog(QDialog):
         form.addRow("", self._an)
 
         # 7. Notifications
+        form = self._section_forms["Notifications"]
         self._no = QCheckBox("Desktop notifications")
         self._no.setChecked(self._s.get("notifications_enabled", True))
         form.addRow("", self._no)
+        self._notification_category_controls = {}
+        for key, label in (
+            ("notification_reminders", "Reminder and task notifications"),
+            ("notification_alarms", "Alarm notifications"),
+            ("notification_focus", "Focus notifications"),
+            ("notification_wellness", "Wellness notifications"),
+        ):
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(self._s.get(key, True))
+            checkbox.setEnabled(self._no.isChecked())
+            self._no.toggled.connect(checkbox.setEnabled)
+            form.addRow("", checkbox)
+            self._notification_category_controls[key] = checkbox
         self._alarm_sound = QCheckBox("Play sound for alarms")
         self._alarm_sound.setChecked(self._s.get("sound_enabled", False))
         form.addRow("", self._alarm_sound)
@@ -202,39 +229,13 @@ class SettingsDialog(QDialog):
             form.addRow("", row)
             self._wellness_controls[key] = (enabled, interval, setting_key, interval_key)
 
+        form = self._section_forms["AI & Voice"]
         self._ai_enabled = QCheckBox("Enable AI trigger prefix")
         self._ai_enabled.setChecked(self._s.get("ai_trigger_enabled", True))
         form.addRow("", self._ai_enabled)
-        self._provider = QComboBox()
-        self._provider.addItem("Echo (offline)", "echo")
-        self._provider.addItem("OpenAI", "openai")
-        self._provider.addItem("Google Gemini", "gemini")
-        provider_index = self._provider.findData(self._s.get("ai_provider", "echo"))
-        if provider_index < 0:
-            provider_index = 0
-        self._provider.setCurrentIndex(provider_index)
-        self._provider.currentIndexChanged.connect(self._provider_changed)
-        form.addRow("AI provider:", self._provider)
-        selected_provider = self._provider.currentData()
-        default_model = {
-            "openai": "gpt-4o-mini",
-            "gemini": "gemini-2.5-flash",
-        }.get(selected_provider, "")
-        self._ai_model = QLineEdit(
-            str(self._s.get("ai_model", "") or default_model)
-        )
-        self._ai_model.setPlaceholderText("Provider default model")
-        form.addRow("AI model:", self._ai_model)
-        default_env = {
-            "openai": "OPENAI_API_KEY",
-            "gemini": "GEMINI_API_KEY",
-        }.get(selected_provider, "")
-        self._ai_key_env = QLineEdit(
-            str(self._s.get("ai_api_key_env_var", "") or default_env)
-        )
-        if selected_provider == "gemini" and self._ai_key_env.text() == "OPENAI_API_KEY":
-            self._ai_key_env.setText("GEMINI_API_KEY")
-        form.addRow(_MarqueeLabel("API key environment variable:"), self._ai_key_env)
+        ai_pipeline = QPushButton("Open AI Pipeline Settings")
+        ai_pipeline.clicked.connect(self._open_ai_pipeline)
+        form.addRow("AI provider & models:", ai_pipeline)
         self._ai_keyword = QLineEdit(str(self._s.get("ai_trigger_keyword", "Friday")))
         self._ai_keyword.setPlaceholderText("Friday")
         form.addRow("AI Trigger Keyword:", self._ai_keyword)
@@ -243,6 +244,19 @@ class SettingsDialog(QDialog):
         )
         self._ai_aliases.setPlaceholderText("Optional aliases, separated by commas")
         form.addRow("Aliases:", self._ai_aliases)
+        self._tts_enabled = QCheckBox("Speak all assistant responses")
+        self._tts_enabled.setChecked(self._s.get("tts_enabled", False))
+        form.addRow("", self._tts_enabled)
+        voice_setup = QPushButton("Voice input and voice selection…")
+        voice_setup.clicked.connect(self._open_voice)
+        form.addRow("Voice:", voice_setup)
+        ai_note = _MarqueeLabel(
+            "Configured trigger words at the start of a message always use the AI pipeline."
+        )
+        ai_note.setStyleSheet("QLabel{color:rgba(180,180,255,160);font-size:10px;}")
+        form.addRow("", ai_note)
+
+        form = self._section_forms["Focus & Tools"]
         self._focus_duration = QSpinBox()
         self._focus_duration.setRange(1, 240)
         self._focus_duration.setSuffix(" min")
@@ -260,13 +274,7 @@ class SettingsDialog(QDialog):
             self._s.get("focus_nudge_cooldown_minutes", 10)
         )
         form.addRow("Nudge cooldown:", self._focus_cooldown)
-        ai_note = _MarqueeLabel(
-            "Routes typed or recognized requests to AI; this is not a microphone wake word."
-        )
-        ai_note.setStyleSheet("QLabel{color:rgba(180,180,255,160);font-size:10px;}")
-        form.addRow("", ai_note)
-
-        bl.addLayout(form)
+        bl.addWidget(self._sections)
 
         # Divider
         div = QFrame(); div.setObjectName("div")
@@ -287,7 +295,6 @@ class SettingsDialog(QDialog):
 
         tool_actions = (
             ("Behavior & Responses", self._open_behavior),
-            ("Voice Setup", self._open_voice),
             ("Focus App Rules", self._open_focus_rules),
             ("Robot Appearance", self._open_animations),
             ("Tasks", self._open_tasks),
@@ -304,6 +311,21 @@ class SettingsDialog(QDialog):
         div2 = QFrame(); div2.setObjectName("div")
         div2.setFrameShape(QFrame.Shape.HLine)
         bl.addWidget(div2)
+
+        chest_legend = _MarqueeLabel(
+            "Chest lights: Purple = Voice • Blue = Focus • Amber = Reminders • "
+            "Pink = Actions • Cyan = listening • Red = muted / reminder due • "
+            "Green = Focus active. Click a light to use its function."
+        )
+        chest_legend.setStyleSheet(
+            "QLabel{color:#fff0bd;font-size:10px;"
+            "background:rgba(35,24,8,150);border-radius:6px;padding:3px;}"
+        )
+        chest_legend.setAccessibleName(
+            "Chest button color legend: purple voice, blue focus, amber reminders, "
+            "pink actions, cyan listening, red muted or reminder due, green focus active."
+        )
+        bl.addWidget(chest_legend)
 
         # Bottom buttons
         brow = QHBoxLayout(); brow.setSpacing(8)
@@ -331,22 +353,11 @@ class SettingsDialog(QDialog):
         p = AdvancedConfig().path
         os.startfile(p)  # type: ignore[attr-defined]
 
-    def _provider_changed(self, _index: int) -> None:
-        provider = self._provider.currentData()
-        defaults = {
-            "echo": ("", ""),
-            "openai": ("gpt-4o-mini", "OPENAI_API_KEY"),
-            "gemini": ("gemini-2.5-flash", "GEMINI_API_KEY"),
-        }
-        model, environment_key = defaults.get(provider, ("", ""))
-        if self._ai_model.text().strip() in {
-            "", "gpt-4o-mini", "gemini-2.5-flash"
-        }:
-            self._ai_model.setText(model)
-        if self._ai_key_env.text().strip() in {
-            "OPENAI_API_KEY", "GEMINI_API_KEY", ""
-        }:
-            self._ai_key_env.setText(environment_key)
+    def _open_ai_pipeline(self) -> None:
+        from jarvis.ui.ai_pipeline_dialog import AIPipelineDialog
+        dialog = AIPipelineDialog(self._s, self, gateway=self._ai_gateway)
+        dialog.settings_changed.connect(self.settings_changed.emit)
+        dialog.exec()
 
     def _open_behavior(self) -> None:
         if self._behavior is None or self._router is None:
@@ -359,6 +370,7 @@ class SettingsDialog(QDialog):
             return
         from jarvis.ui.voice_setup_dialog import VoiceSetupDialog
         VoiceSetupDialog(self._s, self._voice, self).exec()
+        self._tts_enabled.setChecked(self._s.get("tts_enabled", False))
 
     def _open_focus_rules(self) -> None:
         from jarvis.ui.focus_rules_dialog import FocusRulesDialog
@@ -380,8 +392,10 @@ class SettingsDialog(QDialog):
 
     def _reset_all(self) -> None:
         from jarvis.config.advanced_config import AdvancedConfig
+        credentials = self._s.get("ai_credentials", [])
         AdvancedConfig().reset_to_defaults()
         self._s.reset_to_defaults()
+        self._s.set("ai_credentials", credentials)
         self._s.save()
         self.settings_changed.emit()
         self.reject()
@@ -395,7 +409,10 @@ class SettingsDialog(QDialog):
         s.set("auto_movement",        self._mv.isChecked())
         s.set("animation_enabled",    self._an.isChecked())
         s.set("notifications_enabled",self._no.isChecked())
+        for key, checkbox in self._notification_category_controls.items():
+            s.set(key, checkbox.isChecked())
         s.set("sound_enabled", self._alarm_sound.isChecked())
+        s.set("tts_enabled", self._tts_enabled.isChecked())
         s.set("wellness_enabled",     self._wl.isChecked())
         for enabled, interval, setting_key, interval_key in self._wellness_controls.values():
             s.set(setting_key, enabled.isChecked())
@@ -403,12 +420,6 @@ class SettingsDialog(QDialog):
         keyword = self._ai_keyword.text().strip()
         s.set("ai_trigger_enabled", self._ai_enabled.isChecked())
         s.set("ai_trigger_keyword", keyword or "Friday")
-        s.set("ai_provider", self._provider.currentData())
-        s.set("ai_model", self._ai_model.text().strip() or "gpt-4o-mini")
-        s.set(
-            "ai_api_key_env_var",
-            self._ai_key_env.text().strip() or "OPENAI_API_KEY",
-        )
         s.set(
             "ai_trigger_aliases",
             [item.strip() for item in self._ai_aliases.text().split(",") if item.strip()],

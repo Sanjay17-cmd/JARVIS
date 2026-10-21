@@ -63,6 +63,56 @@ def test_missing_keys_filled_by_defaults(tmp_settings):
     assert s2.get("animation_fps") == DEFAULTS["animation_fps"]   # filled
 
 
+def test_legacy_default_chest_colors_migrate_but_custom_colors_remain(
+    tmp_settings,
+):
+    _settings, tmp = tmp_settings
+    settings_file = tmp / "JARVIS" / "settings.json"
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+    settings_file.write_text(json.dumps({
+        "chest_buttons": [
+            {"id": 0, "color": "#00dcff"},
+            {"id": 1, "color": "#123456"},
+        ],
+    }))
+
+    migrated = Settings()
+
+    assert migrated.get("chest_buttons")[0]["color"] == "#B84DFF"
+    assert migrated.get("chest_buttons")[1]["color"] == "#123456"
+
+
+def test_legacy_gemini_provider_and_model_migrate_to_gateway_settings(tmp_settings):
+    _settings, tmp = tmp_settings
+    settings_file = tmp / "JARVIS" / "settings.json"
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+    settings_file.write_text(json.dumps({
+        "ai_provider": "gemini",
+        "ai_model": "gemini-account-model",
+    }))
+
+    migrated = Settings()
+
+    assert migrated.get("ai_primary_provider") == "gemini"
+    assert migrated.get("ai_primary_model") == "gemini-account-model"
+
+
+def test_legacy_openai_provider_and_model_remain_supported_by_gateway(tmp_settings):
+    _settings, tmp = tmp_settings
+    settings_file = tmp / "JARVIS" / "settings.json"
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+    settings_file.write_text(json.dumps({
+        "ai_provider": "openai",
+        "ai_model": "gpt-legacy-model",
+        "ai_api_key_env_var": "OPENAI_API_KEY",
+    }))
+
+    migrated = Settings()
+
+    assert migrated.get("ai_primary_provider") == "openai"
+    assert migrated.get("ai_primary_model") == "gpt-legacy-model"
+
+
 def test_reset_to_defaults(tmp_settings):
     s, _ = tmp_settings
     s.set("robot_size", 999)

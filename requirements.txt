@@ -1,5 +1,5 @@
-# JARVIS Phase 1 — Core Dependencies
-# Install with: pip install -r requirements.txt
+# JARVIS runtime and development dependencies
+# Install with: python -m pip install -r requirements.txt
 
 # --- UI Framework ---
 PySide6>=6.7.0
@@ -7,25 +7,19 @@ PySide6>=6.7.0
 # --- Image Processing ---
 Pillow>=10.0.0
 
+# --- Configuration and API providers ---
+python-dotenv>=1.0.1
+openai>=1.0.0
+keyring>=25.2.0
+
+# --- Local voice input and speech output ---
+sounddevice>=0.4.7
+faster-whisper>=1.1.0
+pyttsx3>=2.90
+
 # --- Testing ---
 pytest>=8.0.0
 pytest-qt>=4.4.0
 
 # --- Packaging (run separately) ---
 pyinstaller>=6.0.0
-
-# ============================================================
-# Phase 2 additions (install when implementing voice/vision):
-# ============================================================
-# opencv-python>=4.8.0      # already installed
-# mediapipe>=0.10.0
-# sherpa-onnx>=1.9.0
-# Optional local voice input: pip install sounddevice faster-whisper
-# Optional speech output: pip install pyttsx3
-
-# ============================================================
-# Phase 3 additions (AI providers):
-# ============================================================
-# openai>=1.0.0
-# anthropic>=0.20.0
-# httpx>=0.27.0

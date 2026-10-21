@@ -43,6 +43,36 @@ class Settings:
             try:
                 stored = json.loads(self._path.read_text(encoding="utf-8"))
                 self._data.update(stored)
+                legacy_chest_colors = {
+                    0: ("#00dcff", "#B84DFF"),
+                    1: ("#00ff96", "#2878FF"),
+                    2: ("#ffc800", "#FFB000"),
+                    3: ("#ff6400", "#FF4FA3"),
+                }
+                buttons = self._data.get("chest_buttons", [])
+                if isinstance(buttons, list):
+                    for button in buttons:
+                        if not isinstance(button, dict):
+                            continue
+                        color_pair = legacy_chest_colors.get(button.get("id"))
+                        saved_color = button.get("color")
+                        if (
+                            color_pair
+                            and isinstance(saved_color, str)
+                            and saved_color.casefold() == color_pair[0]
+                        ):
+                            button["color"] = color_pair[1]
+                if (
+                    "ai_primary_provider" not in stored
+                    and stored.get("ai_provider") in {"gemini", "openai"}
+                ):
+                    self._data["ai_primary_provider"] = stored["ai_provider"]
+                if (
+                    "ai_primary_model" not in stored
+                    and stored.get("ai_provider") in {"gemini", "openai"}
+                    and stored.get("ai_model")
+                ):
+                    self._data["ai_primary_model"] = stored["ai_model"]
                 log.info("Settings loaded from %s", self._path)
             except Exception as exc:
                 log.warning("Could not load settings (%s); using defaults.", exc)

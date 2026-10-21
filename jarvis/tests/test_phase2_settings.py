@@ -12,6 +12,7 @@ Tests:
 import json
 import pytest
 from pathlib import Path
+from PySide6.QtWidgets import QLabel
 from jarvis.config.settings import Settings
 from jarvis.config.defaults import DEFAULTS
 
@@ -50,6 +51,37 @@ def test_panels_always_on_top_true_persists(tmp_s):
     s.save()
     s2 = Settings()
     assert s2.get("panels_always_on_top") is True
+
+
+def test_settings_has_top_section_tabs_and_persists_chat_voice_options(
+    tmp_s, qtbot
+):
+    from jarvis.ui.settings_dialog import SettingsDialog
+
+    settings, _ = tmp_s
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+    assert [
+        dialog._sections.tabText(index)
+        for index in range(dialog._sections.count())
+    ] == ["General", "Notifications", "AI & Voice", "Focus & Tools"]
+    dialog._tts_enabled.setChecked(True)
+    dialog._ai_keyword.setText("Friday")
+    dialog._ai_aliases.setText("Susanth, Computer")
+    dialog._notification_category_controls["notification_reminders"].setChecked(False)
+
+    legend = next(
+        widget for widget in dialog.findChildren(QLabel)
+        if widget.accessibleName().startswith("Chest button color legend")
+    )
+    assert "Purple = Voice" in legend.toolTip()
+
+    dialog._apply()
+
+    assert settings.get("tts_enabled") is True
+    assert settings.get("ai_trigger_keyword") == "Friday"
+    assert settings.get("ai_trigger_aliases") == ["Susanth", "Computer"]
+    assert settings.get("notification_reminders") is False
 
 
 # ── Phase 2 defaults present ─────────────────────────────────────────────────

@@ -12,6 +12,8 @@ Phase 2 changes:
 from __future__ import annotations
 
 import logging
+import inspect
+from threading import Event
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -28,6 +30,7 @@ from jarvis.core.state import RobotState
 
 class _CommandWorker(QObject):
     chunk = Signal(str)
+    reset_stream = Signal()
     completed = Signal(str)
     failed = Signal(str)
 
@@ -35,13 +38,34 @@ class _CommandWorker(QObject):
         super().__init__()
         self._router = router
         self._text = text
+        self.cancel_event = Event()
 
     @Slot()
     def run(self) -> None:
         try:
-            self.completed.emit(
-                self._router.route_stream(self._text, self.chunk.emit)
-            )
+            route_stream = self._router.route_stream
+            try:
+                parameters = list(inspect.signature(route_stream).parameters.values())
+            except (TypeError, ValueError):
+                parameters = []
+            parameter_names = {parameter.name for parameter in parameters}
+            if "on_reset" in parameter_names:
+                response = route_stream(
+                    self._text,
+                    self.chunk.emit,
+                    cancel_event=self.cancel_event,
+                    on_reset=self.reset_stream.emit,
+                )
+            elif "cancel_event" in parameter_names or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            ):
+                response = route_stream(
+                    self._text, self.chunk.emit, cancel_event=self.cancel_event
+                )
+            else:
+                response = route_stream(self._text, self.chunk.emit)
+            self.completed.emit(response)
         except Exception as exc:
             log.exception("Command worker failed")
             self.failed.emit(str(exc))
@@ -136,11 +160,18 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
 class _MessageBubble(QLabel):
     """Single chat-message bubble (user or assistant)."""
 
-    def __init__(self, text: str, is_user: bool = False, timestamp: str = "") -> None:
+    def __init__(
+        self,
+        text: str,
+        is_user: bool = False,
+        timestamp: str = "",
+        predefined: bool = False,
+    ) -> None:
         super().__init__()
         # Combine timestamp + text
         ts = f"  [{timestamp}]" if timestamp else ""
-        self.setText(text + ts)
+        prefix = "◆ BUILT-IN RESPONSE\n" if predefined else ""
+        self.setText(prefix + text + ts)
         self.setWordWrap(True)
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
@@ -169,6 +200,8 @@ class InteractionPanel(QWidget):
     close_requested  = Signal()
     open_tasks_requested = Signal()
     voice_active_changed = Signal(bool)
+    message_added = Signal(str, str)
+    conversation_changed = Signal(str)
 
     def __init__(
         self,
@@ -192,6 +225,7 @@ class InteractionPanel(QWidget):
         self._stream_bubble: _MessageBubble | None = None
         self._streamed_response = ""
         self._stream_timestamp = ""
+        self._last_request_text = ""
         from jarvis.scheduling.database import active_conversation_id
         self._conversation_id = active_conversation_id()
 
@@ -219,6 +253,10 @@ class InteractionPanel(QWidget):
 
     def apply_topmost(self, on: bool) -> None:
         """Apply or remove WindowStaysOnTopHint without closing the window."""
+        if self.isVisible():
+            from jarvis.platform.windows_window import set_topmost_in_place
+            if set_topmost_in_place(int(self.winId()), on):
+                return
         base_flags = (
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
@@ -295,6 +333,10 @@ class InteractionPanel(QWidget):
         self._msg_layout.setContentsMargins(0, 0, 0, 0)
         self._msg_layout.addStretch()
         self._scroll.setWidget(self._msg_container)
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.setInterval(50)
+        self._scroll_timer.timeout.connect(self._scroll_to_bottom)
         root.addWidget(self._scroll)
 
         # ── Status bar ───────────────────────────────────────────────────
@@ -304,7 +346,13 @@ class InteractionPanel(QWidget):
             "font-family:'Segoe UI',Arial;}"
         )
         self._lbl_status.setVisible(False)
-        root.addWidget(self._lbl_status)
+        status_row = QHBoxLayout()
+        status_row.addWidget(self._lbl_status, 1)
+        self._btn_retry = QPushButton("Retry")
+        self._btn_retry.setVisible(False)
+        self._btn_retry.clicked.connect(self._retry_last_request)
+        status_row.addWidget(self._btn_retry)
+        root.addLayout(status_row)
 
         # ── Input row ────────────────────────────────────────────────────
         input_row = QHBoxLayout()
@@ -375,22 +423,25 @@ class InteractionPanel(QWidget):
         *,
         persist: bool = True,
         timestamp: str | None = None,
+        predefined: bool = False,
     ) -> _MessageBubble:
         ts = timestamp or datetime.now().strftime("%H:%M")
-        bubble = _MessageBubble(text, is_user=is_user, timestamp=ts)
+        bubble = _MessageBubble(
+            text, is_user=is_user, timestamp=ts, predefined=predefined
+        )
         count = self._msg_layout.count()
         self._msg_layout.insertWidget(count - 1, bubble)
-        QTimer.singleShot(
-            50,
-            lambda: self._scroll.verticalScrollBar().setValue(
-                self._scroll.verticalScrollBar().maximum()
-            ),
-        )
+        self._scroll_timer.start()
         if persist and self._settings is not None and self._settings.get(
             "retain_conversation", True
         ):
             self._persist_message("user" if is_user else "assistant", text)
         return bubble
+
+    @Slot()
+    def _scroll_to_bottom(self) -> None:
+        scrollbar = self._scroll.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _persist_message(self, role: str, text: str) -> None:
         from time import time
@@ -437,6 +488,7 @@ class InteractionPanel(QWidget):
         from jarvis.scheduling.database import create_conversation
 
         self._conversation_id = create_conversation()
+        self.conversation_changed.emit(self._conversation_id)
         self._clear_messages()
         self._add_message(
             "New conversation. Your previous chats remain available from Chats.",
@@ -452,6 +504,7 @@ class InteractionPanel(QWidget):
 
         set_active_conversation(conversation_id)
         self._conversation_id = conversation_id
+        self.conversation_changed.emit(self._conversation_id)
         self._clear_messages()
         try:
             messages = conversation_messages(conversation_id)
@@ -584,17 +637,24 @@ class InteractionPanel(QWidget):
         text = self._input.text().strip()
         if not text:
             return
+        self._last_request_text = text
+        self._btn_retry.setVisible(False)
         self._input.clear()
         self._add_message(text, is_user=True)
+        self.message_added.emit("user", text)
         self._set_busy(True)
         self._state_manager.transition(RobotState.THINKING)
         self._cancelled = False
         self._stream_bubble = None
         self._streamed_response = ""
         self._stream_timestamp = datetime.now().strftime("%H:%M")
+        self._pending_predefined_response = False
         self.command_issued.emit(text)
         if self._router.has_builtin(text):
             response = self._router.route(text)
+            self._pending_predefined_response = bool(
+                getattr(self._router, "last_response_is_predefined", False)
+            )
             self._on_response_chunk(response)
             self._on_command_completed(response)
             self._set_busy(False)
@@ -605,6 +665,7 @@ class InteractionPanel(QWidget):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.chunk.connect(self._on_response_chunk)
+        worker.reset_stream.connect(self._on_stream_reset)
         worker.completed.connect(self._on_command_completed)
         worker.failed.connect(self._on_command_failed)
         worker.completed.connect(thread.quit)
@@ -627,10 +688,24 @@ class InteractionPanel(QWidget):
                 is_user=False,
                 persist=False,
                 timestamp=self._stream_timestamp,
+                predefined=self._pending_predefined_response,
             )
-        self._stream_bubble.setText(
-            f"{self._streamed_response}  [{self._stream_timestamp}]"
+        prefix = (
+            "◆ BUILT-IN RESPONSE\n"
+            if self._pending_predefined_response
+            else ""
         )
+        self._stream_bubble.setText(
+            f"{prefix}{self._streamed_response}  [{self._stream_timestamp}]"
+        )
+
+    @Slot()
+    def _on_stream_reset(self) -> None:
+        self._streamed_response = ""
+        if self._stream_bubble is not None:
+            self._msg_layout.removeWidget(self._stream_bubble)
+            self._stream_bubble.deleteLater()
+            self._stream_bubble = None
 
     @Slot(str)
     def _on_command_completed(self, response: str) -> None:
@@ -642,13 +717,22 @@ class InteractionPanel(QWidget):
                 is_user=False,
                 persist=False,
                 timestamp=self._stream_timestamp,
+                predefined=self._pending_predefined_response,
             )
         else:
+            prefix = (
+                "◆ BUILT-IN RESPONSE\n"
+                if self._pending_predefined_response
+                else ""
+            )
             self._stream_bubble.setText(
-                f"{response}  [{self._stream_timestamp}]"
+                f"{prefix}{response}  [{self._stream_timestamp}]"
             )
         if self._settings is not None and self._settings.get("retain_conversation", True):
             self._persist_message("assistant", response)
+        if response:
+            self.message_added.emit("assistant", response)
+        self._btn_retry.setVisible(response.startswith("⚠ AI request failed:"))
         self._state_manager.transition(RobotState.SUCCESS)
         if self._voice is not None:
             self._voice.speak(response)
@@ -677,13 +761,36 @@ class InteractionPanel(QWidget):
         if self._command_thread is None:
             return
         self._cancelled = True
+        if self._command_worker is not None:
+            self._command_worker.cancel_event.set()
         self._btn_cancel.setEnabled(False)
         self._lbl_status.setText("Stopping response…")
         self._lbl_status.setVisible(True)
 
+    @Slot()
+    def _retry_last_request(self) -> None:
+        if self._command_thread is not None or not self._last_request_text:
+            return
+        self._input.setText(self._last_request_text)
+        self._on_send()
+
     def set_input_text(self, text: str) -> None:
         self._input.setText(text)
         self._input.setFocus()
+
+    def add_reminder_message(self, title: str, description: str = "") -> None:
+        text = f"🔔 Reminder: {title}"
+        if description.strip():
+            text += f"\n{description.strip()}"
+        self._add_message(
+            text,
+            is_user=False,
+            persist=bool(
+                self._settings is not None
+                and self._settings.get("retain_conversation", True)
+            ),
+        )
+        self.message_added.emit("assistant", text)
 
     def toggle_voice(self) -> None:
         if self._voice is None:
@@ -714,6 +821,11 @@ class InteractionPanel(QWidget):
     @Slot(str)
     def _on_voice_error(self, message: str) -> None:
         self._add_message(f"⚠ Voice: {message}", is_user=False)
+        self.message_added.emit("assistant", f"Voice error: {message}")
+
+    @property
+    def current_conversation_id(self) -> str:
+        return self._conversation_id
 
     # ── State indicator ───────────────────────────────────────────────────
 

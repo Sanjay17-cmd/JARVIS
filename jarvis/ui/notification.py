@@ -46,7 +46,7 @@ QPushButton#cls:hover{color:#ff4444;}
 _NOTIF_W = 320
 _NOTIF_H = 80   # base height; expands if body is long
 _MARGIN  = 14
-_BOTTOM_GAP = 72
+_BOTTOM_GAP = 0
 
 
 class _ToastWidget(QWidget):
@@ -188,6 +188,8 @@ class NotificationQueue(QObject):
         super().__init__()
         self._queue: deque[dict] = deque()
         self._active: list[_ToastWidget] = []
+        self._settings = None
+        self._anchor = None
         self._enqueue.connect(
             self._push_payload,
             Qt.ConnectionType.QueuedConnection,
@@ -199,12 +201,33 @@ class NotificationQueue(QObject):
             NotificationQueue._instance = NotificationQueue()
         return NotificationQueue._instance
 
+    def configure(self, settings, anchor=None) -> None:
+        self._settings = settings
+        self._anchor = anchor
+
     def push(self, icon: str, title: str, body: str = "",
              snooze_cb: Callable | None = None,
              duration_ms: int = 6000,
-             actions: list[tuple[str, Callable[[], None]]] | None = None) -> None:
+             actions: list[tuple[str, Callable[[], None]]] | None = None,
+             category: str = "other") -> None:
         """Thread-safe: can be called from any thread."""
-        payload = (icon, title, body, snooze_cb, duration_ms, actions)
+        if self._settings is not None:
+            if not self._settings.get("notifications_enabled", True):
+                log.debug("Notification suppressed by master setting: %s", title)
+                return
+            setting_key = {
+                "reminders": "notification_reminders",
+                "alarms": "notification_alarms",
+                "focus": "notification_focus",
+                "wellness": "notification_wellness",
+            }.get(category)
+            if setting_key and not self._settings.get(setting_key, True):
+                log.debug(
+                    "Notification suppressed by %s setting: %s",
+                    setting_key, title,
+                )
+                return
+        payload = (icon, title, body, snooze_cb, duration_ms, actions, category)
         if QApplication.instance() and \
                 QApplication.instance().thread() != self.thread():
             self._enqueue.emit(payload)
@@ -213,25 +236,33 @@ class NotificationQueue(QObject):
 
     @Slot(object)
     def _push_payload(self, payload: tuple) -> None:
-        icon, title, body, snooze_cb, duration_ms, actions = payload
+        icon, title, body, snooze_cb, duration_ms, actions, category = payload
         toast = _ToastWidget(icon, title, body, snooze_cb, duration_ms, actions)
+        toast._notification_category = category
         toast.dismissed.connect(lambda t=toast: self._on_dismissed(t))
-        screen = QGuiApplication.primaryScreen().availableGeometry()
-        x = screen.right() - _NOTIF_W - _MARGIN
-        y = screen.bottom() - _NOTIF_H - _MARGIN - _BOTTOM_GAP - (len(self._active) * (_NOTIF_H + 8))
-        toast.show_at(x, max(screen.top() + _MARGIN, y))
+        self._place_toast(toast, len(self._active))
+        toast._anim_in.start()
+        toast._auto_timer.start()
         self._active.append(toast)
         log.debug("Notification: %s — %s", title, body)
+
+    def _place_toast(self, toast: _ToastWidget, index: int) -> None:
+        bounds = QGuiApplication.primaryScreen().availableGeometry()
+        x = bounds.right() - toast.width() - _MARGIN
+        y = bounds.bottom() - toast.height() - _MARGIN - _BOTTOM_GAP - (
+            index * (toast.height() + 8)
+        )
+        y = max(bounds.top() + _MARGIN, y)
+        toast.move(x, y)
+        toast.show()
 
     def _on_dismissed(self, toast: _ToastWidget) -> None:
         if toast in self._active:
             self._active.remove(toast)
         toast.deleteLater()
         # Re-position remaining
-        screen = QGuiApplication.primaryScreen().availableGeometry()
         for i, t in enumerate(self._active):
-            y = screen.bottom() - _NOTIF_H - _MARGIN - _BOTTOM_GAP - i * (_NOTIF_H + 8)
-            t.move(t.x(), max(screen.top() + _MARGIN, y))
+            self._place_toast(t, i)
 
 
 # ── Convenience function ──────────────────────────────────────────────────────
@@ -239,8 +270,9 @@ class NotificationQueue(QObject):
 def notify(icon: str, title: str, body: str = "",
            snooze_cb: Callable | None = None,
            duration_ms: int = 6000,
-           actions: list[tuple[str, Callable[[], None]]] | None = None) -> None:
+           actions: list[tuple[str, Callable[[], None]]] | None = None,
+           category: str = "other") -> None:
     """Call from anywhere. Uses the global NotificationQueue."""
     NotificationQueue.instance().push(
-        icon, title, body, snooze_cb, duration_ms, actions
+        icon, title, body, snooze_cb, duration_ms, actions, category
     )
