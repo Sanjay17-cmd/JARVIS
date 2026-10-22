@@ -77,9 +77,73 @@ def test_openrouter_image_request_reports_missing_credentials():
     try:
         generate_image("A peacock", "", "qwen/qwen-image-2.1-turbo")
     except ImageGenerationError as exc:
-        assert "No OpenRouter API key" in str(exc)
+        assert "No provider API key" in str(exc)
     else:
-        raise AssertionError("Expected missing OpenRouter credentials to fail.")
+        raise AssertionError("Expected missing provider credentials to fail.")
+
+
+def test_gemini_image_request_decodes_image(monkeypatch):
+    from jarvis.ai.image_generation import ImageGenerationError
+
+    raw_image = b"gemini-image-bytes"
+    requests = []
+
+    class GeminiResponse(_Response):
+        def __init__(self, payload=None):
+            super().__init__(payload or {})
+
+        def read(self):
+            return json.dumps({
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "inlineData": {
+                                "mimeType": "image/png",
+                                "data": base64.b64encode(raw_image).decode("ascii"),
+                            }
+                        }]
+                    }
+                }]
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        requests.append((request.full_url, request.get_header("x-goog-api-key"), timeout))
+        return GeminiResponse()
+
+    monkeypatch.setattr("jarvis.ai.image_generation.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "jarvis.ai.image_generation.list_free_openrouter_models",
+        lambda *args, **kwargs: [],
+    )
+
+    result = generate_image(
+        "A peacock in a garden",
+        "gemini-test-key",
+        "gemini-2.0-flash-preview-image-generation",
+        timeout=45,
+    )
+
+    assert result.content == raw_image
+    assert result.media_type == "image/png"
+    assert result.cost_usd is None
+    assert requests[0][0].startswith("https://generativelanguage.googleapis.com/v1beta/models/")
+    assert requests[0][1] in {"gemini-test-key", None}
+    assert requests[0][2] == 45
+
+
+def test_gemini_image_generation_rejects_unverified_free_model(monkeypatch):
+    from jarvis.ai.image_generation import ImageGenerationError
+
+    monkeypatch.setattr(
+        "jarvis.ai.image_generation.list_free_openrouter_models",
+        lambda *args, **kwargs: [],
+    )
+    try:
+        generate_image("A peacock", "gemini-test-key", "gemini-2.0-flash")
+    except ImageGenerationError as exc:
+        assert "known free Gemini image model" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported Gemini image model to fail.")
 
 
 def test_openrouter_image_request_rejects_invalid_image_data(monkeypatch):
@@ -169,7 +233,12 @@ def test_free_image_catalog_filters_by_image_modality_and_all_zero_prices(monkey
     )
 
     assert list_free_image_models() == [
-        {"id": "provider/image:free", "name": "Free Image", "free": True}
+        {"id": "provider/image:free", "name": "Free Image", "free": True},
+        {"id": "gemini-2.0-flash-exp-image-generation", "name": "gemini-2.0-flash-exp-image-generation", "free": True},
+        {"id": "gemini-2.0-flash-preview-image-generation", "name": "gemini-2.0-flash-preview-image-generation", "free": True},
+        {"id": "gemini-2.5-flash-image-preview", "name": "gemini-2.5-flash-image-preview", "free": True},
+        {"id": "imagen-3.0-generate-001", "name": "imagen-3.0-generate-001", "free": True},
+        {"id": "imagen-3.0-generate-002", "name": "imagen-3.0-generate-002", "free": True},
     ]
 
 

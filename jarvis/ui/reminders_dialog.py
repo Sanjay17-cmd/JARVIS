@@ -48,6 +48,8 @@ class RemindersDialog(QDialog):
         self._unit.addItem("seconds", 1)
         self._unit.addItem("minutes", 60)
         self._unit.addItem("hours", 3600)
+        self._at_time = QLineEdit()
+        self._at_time.setPlaceholderText("Optional exact time: 7:30 PM or tomorrow 9:00")
         self._recurrence = QComboBox()
         self._recurrence.addItem("Once", "")
         self._recurrence.addItem("Every day", "daily")
@@ -58,6 +60,7 @@ class RemindersDialog(QDialog):
         duration_row.addWidget(self._duration)
         duration_row.addWidget(self._unit)
         form.addRow("In:", duration_row)
+        form.addRow("At:", self._at_time)
         form.addRow("Repeat:", self._recurrence)
         layout.addLayout(form)
         controls = QHBoxLayout()
@@ -145,6 +148,7 @@ class RemindersDialog(QDialog):
         self._edit_id = selection
         self._type.setCurrentIndex(0 if kind == "reminder" else 1)
         self._title.setText(entry["title"])
+        self._at_time.clear()
         remaining = max(1, int(entry["due_at"] - time.time()))
         unit_index = 0
         amount = remaining
@@ -163,11 +167,22 @@ class RemindersDialog(QDialog):
 
     def _add(self) -> None:
         title = self._title.text().strip()
+        explicit_time = self._at_time.text().strip()
         amount = self._duration.value()
-        if not title or amount <= 0:
-            self._status.setText("Enter a title and a duration greater than zero.")
+        if not title:
+            self._status.setText("Enter a title for the reminder or alarm.")
             return
-        due = time.time() + amount * int(self._unit.currentData())
+        if explicit_time:
+            from jarvis.scheduling.reminder_service import parse_time_expression
+            due = parse_time_expression(explicit_time)
+            if due is None:
+                self._status.setText("Use an exact time like 7:30 PM, tomorrow 9:00, or a relative value like in 30 minutes.")
+                return
+        elif amount <= 0:
+            self._status.setText("Enter a duration greater than zero or use the exact time field.")
+            return
+        else:
+            due = time.time() + amount * int(self._unit.currentData())
         try:
             kind = "reminder" if self._type.currentIndex() == 0 else "alarm"
             recurrence = str(self._recurrence.currentData())
@@ -196,6 +211,7 @@ class RemindersDialog(QDialog):
                 self._tabs.setCurrentIndex(1)
                 self._status.setText(f"Saved alarm #{item_id}.")
             self._title.clear()
+            self._at_time.clear()
             self._edit_id = None
             self._add_button.setText("Add")
             self._refresh()
@@ -207,6 +223,7 @@ class RemindersDialog(QDialog):
         self._reminders.setCurrentRow(-1)
         self._alarms.setCurrentRow(-1)
         self._title.clear()
+        self._at_time.clear()
         self._duration.setValue(5)
         self._unit.setCurrentIndex(0)
         self._recurrence.setCurrentIndex(0)

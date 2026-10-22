@@ -26,6 +26,7 @@ from jarvis.ai.image_generation import (
     ImageGenerationError,
     generate_image,
     list_free_image_models,
+    provider_for_image_model,
 )
 
 log = logging.getLogger(__name__)
@@ -103,9 +104,9 @@ class ImageCreationDialog(QDialog):
         layout.addLayout(model_row)
 
         billing = QLabel(
-            'Only models marked :free with zero listed prices are enabled. The '
-            'catalogue is checked again before each request. See '
-            '<a href="https://openrouter.ai/models?output_modalities=image">'
+            'Only zero-cost/free-tier image models are enabled. The app checks '
+            'OpenRouter and Gemini-compatible image models before each request. '
+            'See <a href="https://openrouter.ai/models?output_modalities=image">'
             "OpenRouter's live image model catalogue</a>."
         )
         billing.setWordWrap(True)
@@ -178,15 +179,14 @@ class ImageCreationDialog(QDialog):
         self._generate.setEnabled(bool(models))
         if models:
             self._status.setText(
-                f"Found {len(models)} verified free image model(s). "
-                "Pricing will be rechecked before generation."
+                f"Found {len(models)} supported free image model(s). "
+                "The app rechecks the selected model before generation."
             )
         else:
             self._settings.set("image_generation_model", "")
             self._settings.save()
             self._status.setText(
-                "OpenRouter currently lists no image-generation models that "
-                "are explicitly free with zero charges. No paid model will be used."
+                "No zero-cost image models are available right now. No paid model will be used."
             )
 
     @Slot(str)
@@ -215,17 +215,18 @@ class ImageCreationDialog(QDialog):
         self._settings.set("image_generation_model", model)
         self._settings.save()
         if self._gateway is None:
-            self._status.setText("OpenRouter is not configured in AI Pipeline Settings.")
+            self._status.setText("AI image generation is not configured in AI Pipeline Settings.")
             return
+        provider = provider_for_image_model(model)
         try:
-            api_key = self._gateway.get_api_key("openrouter")
+            api_key = self._gateway.get_api_key(provider)
         except Exception as exc:
-            log.exception("Could not retrieve the OpenRouter credential")
-            self._status.setText(f"Could not access the secure OpenRouter key: {exc}")
+            log.exception("Could not retrieve the %s credential", provider)
+            self._status.setText(f"Could not access the secure {provider} key: {exc}")
             return
         if not api_key:
             self._status.setText(
-                "No OpenRouter key found. Add/enable it in Settings → AI Pipeline Settings."
+                f"No {provider.title()} key found. Add/enable it in Settings → AI Pipeline Settings."
             )
             return
 
@@ -233,7 +234,8 @@ class ImageCreationDialog(QDialog):
         self._copy.setEnabled(False)
         self._save.setEnabled(False)
         self._refresh_models.setEnabled(False)
-        self._status.setText("Verifying free model and generating with OpenRouter…")
+        provider = provider_for_image_model(model)
+        self._status.setText(f"Verifying free model and generating with {provider.title()}…")
         thread = QThread(self)
         worker = _ImageWorker(prompt, api_key, model)
         worker.moveToThread(thread)
@@ -254,7 +256,7 @@ class ImageCreationDialog(QDialog):
         preview = QImage.fromData(image.content)
         if preview.isNull():
             self._on_failed(
-                f"OpenRouter returned unsupported image data ({image.media_type})."
+                f"Provider returned unsupported image data ({image.media_type})."
             )
             return
         self._image = image

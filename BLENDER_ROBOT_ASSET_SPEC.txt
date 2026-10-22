@@ -1,0 +1,411 @@
+BLENDER ROBOT ASSET SPECIFICATION
+=================================
+
+1. Executive summary
+--------------------
+Recommended runtime format: Blender-rendered transparent PNG animation sequences, not GLB/glTF.
+
+Why: the project renders a transparent desktop robot with Pillow-generated RGBA frames displayed through Qt via QPixmap/QPainter. There is no runtime 3D loader or 3D engine in the project dependencies, and the project imports only PySide6, Pillow, and standard packaging files. The application is built around a transparent overlay window and a sprite-style animation loop, not a 3D scene graph.
+
+Relevant evidence:
+- jarvis/assets/robot_painter.py: draw_robot() draws a front-facing robot into a transparent RGBA canvas.
+- jarvis/ui/overlay.py: RobotOverlay loads frames into QPixmap objects and paints them directly on a QWidget.
+- requirements.txt: PySide6, Pillow, no glTF/GLB runtime or Blender Python libraries.
+- JARVIS.spec: PyInstaller bundles jarvis/assets/images, icons, sounds; no 3D model asset pipeline is defined.
+
+The current robot is a compact cyan/cobalt mechanical figure with a transparent background, a visor, a torso chest panel, and four interactive chest buttons. The app supports live resize, floating window movement, and state-based animation override. Blender output should preserve those traits and stay in a sprite-based format compatible with the current overlay system.
+
+2. Existing architecture
+------------------------
+Renderer, overlay, asset loading, and relevant code paths:
+
+- jarvis/assets/robot_painter.py
+  - draw_robot(size=...) creates a transparent RGBA robot.
+  - get_led_positions(size) returns the exact chest LED centers used for hit testing.
+  - generate_animation_frames(...) creates per-state animation frames.
+  - ensure_assets(...) caches PNG frames in jarvis/assets/images using a size stamp.
+
+- jarvis/assets/__init__.py
+  - IMAGES_DIR = jarvis/assets/images.
+  - get_frames() returns cached frames for a given state and size.
+
+- jarvis/ui/overlay.py
+  - _FrameWorker runs on a QThread to build frames in the background.
+  - RobotOverlay starts frame generation on app start and on resize.
+  - _TICK_MS = 33 (approx 30 fps) drives the master animation + movement timer.
+  - paintEvent() draws the current frame pixmap onto the transparent overlay.
+  - _chest_button_hit_rects() creates the four non-overlapping clickable areas over the chest LEDs.
+  - mousePressEvent()/mouseReleaseEvent() handle drag-to-move and chest-button clicks.
+  - _on_state_change() clears animation overrides and updates status text.
+
+- jarvis/config/defaults.py
+  - robot_size default = 120
+  - opacity default = 1.0
+  - always_on_top default = True
+  - auto_movement default = True
+  - movement_speed default = 1.2
+  - safe_margin default = 20
+  - animation_enabled default = True
+  - chest_buttons list defines Voice, Focus, Reminders, Actions.
+
+- jarvis/ui/settings_dialog.py
+  - Settings page exposes Robot size, Opacity, Always on top, motion, animations, notifications, and AI/voice options.
+
+- jarvis/app.py
+  - event subscriptions for toggle_voice, toggle_focus, open_reminders, open_quick_menu.
+  - _scheduler_tick() triggers reminder/alarm animations such as alarm, thirsty, success.
+  - _apply_settings() applies opacity, robot_size, always_on_top, movement, and panel topmost immediately.
+  - set_mic_active(), set_mic_muted(), set_camera_active(), set_reminder_due() update chest button status colors.
+
+- jarvis/core/state.py
+  - RobotState enum: IDLE, LISTENING, THINKING, SPEAKING, SUCCESS, ERROR, PAUSED.
+  - Valid transitions are limited to known state changes.
+
+- jarvis/ui/interaction_panel.py
+  - State changes are mapped into UI badges and voice/text speech interactions.
+
+- jarvis/voice/__init__.py
+  - Local speech recognition and optional TTS are built around the same app lifecycle; actual robot state transitions are not fully wired to speech states.
+
+- main.py / JARVIS.spec
+  - App entry point and packaging path for Windows runtime.
+
+3. Evidence table
+-----------------
+Requirement | Value | Source file/function | Confidence
+
+Runtime renderer | Pillow RGBA sprite frames painted via Qt QPixmap/QPainter; no GLB/glTF runtime or 3D engine detected | jarvis/assets/robot_painter.py: draw_robot(); jarvis/ui/overlay.py: paintEvent(); requirements.txt | High
+Default robot canvas | 120x120 px, transparent alpha canvas | jarvis/config/defaults.py: robot_size; jarvis/assets/robot_painter.py: draw_robot() | High
+Overlay window | robot_size + 40 px; the artwork is offset by 10 px on each side | jarvis/ui/overlay.py: __init__ and set_robot_size | High
+Visible silhouette | Front-facing robot with head, antenna, visor, neck, torso, chest panel, arms, no visible legs or base | preview_idle.png; jarvis/assets/robot_painter.py | High
+Size range | 60-300 px | jarvis/ui/settings_dialog.py: Robot size slider; jarvis/config/defaults.py | High
+Chest button hit geometry | 4 non-overlapping hit targets, each 5x5 at 120 px default | jarvis/ui/overlay.py: _chest_button_hit_rects(); jarvis/tests/test_chest_button_geometry.py | High
+Animation inventory | 16 IDs: idle, listening, thinking, speaking, success, error, paused, wave, flying, tools, scanning, typing, thirsty, focus, alarm, confused | jarvis/assets/robot_painter.py: generate_animation_frames; jarvis/ui/animation_gallery_dialog.py | High
+Frame timing | 33 ms timer interval (~30 fps) | jarvis/ui/overlay.py: _TICK_MS = 33 | High
+Window movement | Entire overlay drifts within work area; separate from sprite animation | jarvis/ui/overlay.py: _master_tick; _pick_new_target | High
+Chest customization defaults | Voice, Focus, Reminders, Actions; default colors and actions defined | jarvis/config/defaults.py: chest_buttons | High
+Packaging | PyInstaller includes jarvis/assets/images, icons, sounds; missing icon file and no Blender asset pipeline yet | JARVIS.spec | High
+
+4. Robot visual specification
+-----------------------------
+Observed design requirement (must implement as front-facing robot):
+- Square transparent canvas with a 1:1 aspect ratio.
+- Head, visor, eyes, neck, torso, chest panel, and short side arms.
+- No separate legs, no floating base, no visible full-body lower section in the current asset design.
+- Cyan/blue body palette with transparent background and glowing cyan outlines.
+- Eyes use bright cyan glow with white core and dark pupil.
+- Chest panel is a dark translucent panel with 4 LED positions aligned horizontally.
+- Antenna sits at the top center of the head.
+- At default size 120, geometry is approximately:
+  - Head: width 52% of canvas, height 38%
+  - Neck: width 16%, height 6%
+  - Torso: width 62%, height 32%
+  - Chest panel: 55% of torso width, 48% of torso height
+  - Arms: width 8%, height 20%
+  - Antenna: 13% of canvas height
+
+Measured current geometry from the renderer (120px source):
+- Opaque bounds: (12, 1, 109, 107)
+- LED centers: (48, 83), (56, 83), (64, 83), (72, 83)
+- Overlay widget centers: (58, 93), (66, 93), (74, 93), (82, 93)
+- Normalized chest centers relative to the robot’s alpha bounds:
+  - Button 1: (0.474, 0.868)
+  - Button 2: (0.557, 0.868)
+  - Button 3: (0.639, 0.868)
+  - Button 4: (0.722, 0.868)
+
+Visual palette observed from source:
+- BODY_DARK = (20, 40, 70, 255)
+- BODY_MID = (30, 60, 100, 255)
+- BODY_LIGHT = (50, 90, 140, 255)
+- VISOR_BG = (5, 15, 35, 220)
+- VISOR_EDGE = (0, 200, 255, 255)
+- EYE_GLOW = (0, 230, 255, 255)
+- CHEST_PANEL = (10, 25, 55, 200)
+- LED_ACTIVE = (0, 255, 200, 255)
+- LED_IDLE = (0, 120, 160, 180)
+
+What must remain visible and usable at every scale:
+- Head and torso silhouette.
+- Chest panel and button positions.
+- Antenna and visor outline.
+- Eye eyes/visor glow.
+- Strong cyan edge and clear separation between torso and chest panel.
+- Transparent background with no opaque window backdrop.
+
+Observed requirements vs recommendations:
+- Requirement: keep the front-facing robot compact and readable on a transparent overlay.
+- Recommendation: do not add a very large base, long legs, or a detailed full-body prop unless the UI is updated to handle that new size and focus area.
+
+5. Chest button specification
+----------------------------
+The chest buttons are not separate UI widgets; they are hit rectangles over the painted LED positions inside RobotOverlay.
+
+Relevant source:
+- jarvis/ui/overlay.py: _BTN_DEFAULTS, _chest_button_hit_rects(), _ChestButton, paintEvent(), mousePressEvent(), mouseReleaseEvent()
+- jarvis/config/defaults.py: chest_buttons list
+- jarvis/app.py: event subscriptions and chest indicator handlers
+
+Order and meaning of all four buttons:
+1. Voice
+   - Default action: toggle_voice
+   - Color: #B84DFF
+   - Meaning: microphone / voice command toggle
+2. Focus
+   - Default action: toggle_focus
+   - Color: #2878FF
+   - Meaning: start/stop focus mode
+3. Reminders
+   - Default action: open_reminders
+   - Color: #FFB000
+   - Meaning: reminder and alarm manager
+4. Actions
+   - Default action: open_quick_menu
+   - Color: #FF4FA3
+   - Meaning: quick menu / task manager / actions panel
+
+Current status colors:
+- Voice: purple by default; cyan while listening; red when muted
+- Focus: blue default; green while active
+- Reminders: amber default; red-orange reminder due
+- Actions: pink default
+
+Button geometry and origin:
+- Hit rectangles are computed using get_led_positions(size) from the robot painter.
+- The coordinate origin is the widget’s top-left, in pixels, while the robot is drawn with a 10 px inset from the widget edge.
+- The hit rectangles are kept non-overlapping and inside the robot canvas.
+- These hit areas are not separate Qt child widgets; they are overlay drawing/hit regions on the window.
+
+Important requirement for Blender artist:
+- Leave clear torso space on the chest panel for four button markers.
+- Keep the button centers aligned to the same front-facing chest line across all animation frames.
+- Do not move the chest buttons into a rotating or extended 3D mesh without updating the hit rectangles in code.
+- Buttons should stay clear of the antenna, visor edges, and torso seam.
+
+Recommended safest implementation:
+- Keep the robot mesh front-facing and static, while keeping chest button interaction in the Qt overlay layer where the app already expects it.
+- If the artist creates a 3D model with visible button elements, they should still remain aligned to the same coordinates so the hit rectangles remain valid.
+
+6. Animation matrix
+------------------
+The app uses a sprite state matrix and a timed animation override. Source: jarvis/assets/robot_painter.py and jarvis/ui/overlay.py.
+
+Animation name | Trigger | Current behavior | Desired visual motion | Required moving parts | Duration and looping | Return to idle | Priority
+
+idle | default state and whenever no animation override is active | gentle bob, antenna sway, occasional blink | calm idle, low movement | head, antenna, eyes | 60 frames, loop | stays | normal
+listening | voice listening/session state | eye-pulse, slight head lean, alert antenna | attentive listening pose | head, eyes, antenna | 40 frames, loop | after listening ends | normal
+thinking | processing command / AI request | amber eyes, head rock | thoughtful, slow head tilt | head, eyes, antenna | 40 frames, loop while active | on completion/error | normal
+speaking | spoken reply / TTS playback path | open/close mouth, cyan glow | mouth movement synchronized to speech | mouth/jaw, eyes, antenna | 40 frames, loop | upon completion | normal
+success | successful command / reminder completion | bounce and smile | brief happy nod and bounce | head, antenna | 30 frames, brief loop | auto clear | normal
+error | command failure | shake, frown, red eyes | brief error signal | head, antenna, eyes | 30 frames, brief loop | auto clear | normal
+paused | pause/resume flow | dim eyes, heartbeat glow | low-energy idle | eyes, antenna | 20 frames, loop while paused | resume | normal
+wave | explicit animation action | head motion + effect lines | actual arm wave if modeled | arm, hand, head | 24 frames, timed override | timed override ends | no special priority
+flying | explicit animation action (alias fly) | thruster effects, hover vibe | brief jetpack/floating effect | optional thrusters, head pose | 24 frames, timed override | timed override ends | no special priority
+tools | explicit animation action (alias repair) | tool-like effect | repair/tool-hand motion | arm/hand and tool prop | 24 frames, timed override | timed override ends | no special priority
+scanning | explicit animation action (alias scan) | scanning beam effect | sweep beam across width | beam effect, eyes | 24 frames, timed override | timed override ends | no special priority
+typing | explicit animation action | holographic keyboard effect | quick typing effect | arm/hand and keyboard prop | 24 frames, timed override | timed override ends | no special priority
+thirsty | water reminder / hydration reminder | droplet and alert expression | friendly hydration prompt | eyes, face, optional droplet | 24 frames, timed override | timed override ends | no special priority
+focus | explicit action / special UI state | ring and focus effect | calm concentration pose | head, eyes, optional ring | 24 frames, timed override | timed override ends | no special priority
+alarm | due alarm / urgent reminder | alarm ring and red LEDs | urgent alert | eyes, antenna, ring effects | 24 frames, timed override | timed override ends | higher than ordinary alerts but no protected state queue found
+confused | explicit action | question-mark effect and head tilt | puzzled expression | head, eyes, antenna | 24 frames, timed override | timed override ends | no special priority
+
+Implementation observation:
+- The app has a master timer that advances the currently selected animation frame.
+- A state change clears the active animation override because RobotOverlay._on_state_change() calls _animation_override = None.
+- The animation gallery lists a subset of these states but not all app states. See jarvis/ui/animation_gallery_dialog.py.
+- WA: the settings JSON file includes fly/repair/scan aliases, while the runtime IDs are flying/tools/scanning. This difference must be resolved in a production source model handoff.
+
+7. Blender modeling and rigging specification
+--------------------------------------------
+Recommended Blender version: Blender 4.2 LTS or newer.
+Recommended scene units: use a simple scale that preserves the front-facing proportions and can be exported as PNG frames. Keep a fixed orthographic camera and a fixed frontal view.
+Coordinate convention:
+- Front-facing robot in neutral pose.
+- Face toward the negative Y axis for export convenience.
+- Use centimeters or meters in Blender only as a content authoring scale; the runtime does not read Blender units directly.
+
+Robot structure:
+- root / body
+- head
+- visor / face plate
+- antenna
+- neck
+- torso
+- chest panel
+- button markers (4)
+- left arm, right arm
+- optional prop objects for wave/tools/typing/flying
+- optional eye and mouth controls via shape keys or simple material toggling
+
+Rigging:
+- A single armature is appropriate.
+- Recommended bones:
+  - root
+  - torso
+  - neck
+  - head
+  - antenna
+  - arm.L / arm.R
+  - forearm.L / forearm.R (optional)
+  - hand.L / hand.R (optional)
+- Keep the torso and chest panel stable relative to the camera for all animations.
+- Keep the chest button coordinates fixed across every frame.
+- Use specific bone transforms only where they matter for animation; do not add excessive bones that the app cannot use.
+
+If using shape keys or material animation for eyes and mouth, keep the expressions consistent with the 2D source design; the app expects a front-facing mechanical face with visible blink and open/close mouth states.
+
+8. Rendering/export settings and deliverable file structure
+-----------------------------------------------------------
+Recommended render style:
+- Transparent background required.
+- PNG format with alpha channel.
+- Square canvas, fixed resolution, front view.
+- Render at 300x300 minimum for the default runtime and 600x600 if a supersampling pass is used before downsampling.
+- Use orthographic camera and consistent lighting.
+- Keep all frames centered and aligned.
+- Turn off any background color or filmic output that adds opaque pixels.
+
+File deliverables:
+- Editable source: JARVIS_Robot.blend
+- Rendered sequence folder: animations/
+- Manifest JSON: manifest.json
+- Preview images: front.png, side.png, back.png, animation_contact_sheet.png
+- README.md with export instructions and integration notes
+
+Recommended directory structure:
+JARVIS_Robot/
+  JARVIS_Robot.blend
+  manifest.json
+  animations/
+    idle/
+    listening/
+    thinking/
+    speaking/
+    success/
+    error/
+    paused/
+    wave/
+    flying/
+    tools/
+    scanning/
+    typing/
+    thirsty/
+    focus/
+    alarm/
+    confused/
+  previews/
+    front.png
+    side.png
+    back.png
+    animation_contact_sheet.png
+  README.md
+
+Manifest requirements:
+- animation_id
+- frame_count
+- canvas_size
+- frame_format
+- transparent_background
+- loop_behavior
+- FPS
+- associated state trigger (from app logic if applicable)
+- chest anchor values or normalized button positions
+- source file references
+
+Frame naming:
+- Use zero-padded names such as idle_000.png, idle_001.png, ...
+- Keep the same frame count and naming convention throughout the sequence.
+
+Sequence requirements:
+- All frames in a state must be same size.
+- Frames must not shift due to crop differences.
+- The rendered input should be aligned to the same robot origin for every frame.
+
+9. Required application integration changes
+-------------------------------------------
+The current code will not automatically use a Blender-created robot as-is. Likely integration points:
+
+- jarvis/assets/__init__.py
+  - asset path setup; may need a new loader for packaged sprite folders.
+
+- jarvis/assets/robot_painter.py
+  - existing procedural generator; may be replaced or complemented by a sprite manifest loader.
+  - ensure_assets() currently generates PNGs into the package image directory and deletes them on size change. This must be separated from Blender-exported files.
+
+- jarvis/ui/overlay.py
+  - _FrameWorker and RobotOverlay._start_frame_gen must point to the new sprite manifest or package folder.
+  - _chest_button_hit_rects() must retain four fixed, non-overlapping clickable regions aligned to the final art.
+  - paintEvent() must still draw a transparent PNG with no opaque background.
+  - _master_tick() keeps the 30 fps animation cycle and movement.
+
+- jarvis/config/defaults.py
+  - default robot size and movement parameters remain valid; chest button configuration should remain stable if the art changes.
+
+- jarvis/ui/animation_gallery_dialog.py
+  - preview IDs must match the Blender-exported sequence names and aliases.
+
+- app.py
+  - reminder/alarm event triggers, mic status updates, focus indicator updates, and system transitions must remain connected to the same window state logic.
+
+- JARVIS.spec
+  - new asset folders must be included in PyInstaller packaging.
+
+- Windows packaging and fallback:
+  - maintain a fallback from the procedural robot if the Blender assets are missing or corrupt.
+  - avoid writing into the packaged `jarvis/assets` directory at runtime.
+
+10. Compatibility risks and unresolved questions
+-----------------------------------------------
+- GLB/glTF is not supported by the current project and would require a major new platform integration.
+- The visual/raycast hit geometry is tightly coupled: moving the chest or torso and leaving the hit rectangles unchanged would break click and hover behavior.
+- The runtime currently loads all animation states on demand; large high-resolution PNG sequences could increase memory use significantly.
+- The default size stub logic deletes PNGs in the generated asset folder when size changes. Blender-exported files should be stored separately from generated cache files.
+- The app has animation IDs and alias differences (fly vs flying, repair vs tools, scan vs scanning). Production assets should preserve the names exactly expected by the runtime.
+- States such as listening and speaking are not fully connected to actual robot state transitions in the current code. Some UI hooks exist, but the robot state machine stops short of full state-to-animation mapping.
+- The current overlay uses small clickable hit regions. Blender art may look better with visible button surfaces, but the actual app hit rectangles should be enlarged or repositioned in code for usability.
+- Packaging for Windows is not fully verified in this repo; JARVIS.spec references an icon file that is not present in the current checkout.
+
+11. Final implementation checklist
+---------------------------------
+- [ ] Deliver editable .blend source with no absolute machine paths.
+- [ ] Render front-facing robot on transparent alpha background.
+- [ ] Use a 1:1 square canvas and fixed alignment.
+- [ ] Keep the chest panel and four button markers fixed across all frames.
+- [ ] Preserve cyan/dark-blue style and a soft mechanical personality.
+- [ ] Add exact animation folders and frame naming for all required states.
+- [ ] Include front/side/back preview images and animation contact sheet.
+- [ ] Include a manifest.json with required animation metadata.
+- [ ] Configure PNG export with alpha and no background color.
+- [ ] Ensure button hit rectangles remain valid in the app.
+- [ ] Keep the robot readable at 60, 120, 200, and 300 px sizes.
+- [ ] Do not rely on GLB/glTF or a 3D runtime engine.
+- [ ] Add integrated fallback behavior for missing assets.
+- [ ] Package resource folders correctly for Windows build.
+- [ ] Validate all frame counts, file naming, and transparent background behavior before shipping.
+
+12. Recommended visual improvements
+----------------------------------
+These are optional enhancements and not mandatory requirements established by the current code:
+- Increase the chest-button hit area while keeping the visible button surface consistent with the mesh.
+- Slightly enlarge the torso and chest panel if the final model needs more space for button clarity.
+- Add a small micro-animated antenna glow or subtle head tilt for idle variation.
+- Add more expressive blink/open-mouth variations for speaking and listening.
+- Add optional prop effects for wave, tools, and typing, but keep them inside the robot’s visual footprint and away from the chest panel.
+- Keep all effects subtle enough not to obscure the torso or block the chest button markers.
+
+Source references used throughout this specification:
+- jarvis/assets/robot_painter.py
+- jarvis/ui/overlay.py
+- jarvis/config/defaults.py
+- jarvis/app.py
+- jarvis/core/state.py
+- jarvis/ui/animation_gallery_dialog.py
+- jarvis/ui/settings_dialog.py
+- jarvis/voice/__init__.py
+- jarvis/tests/test_chest_button_geometry.py
+- jarvis/tests/test_robot_animations.py
+- JARVIS.spec
+- requirements.txt
+- preview_idle.png
+
+This report is intentionally written to be complete enough for another AI to build the Blender asset, while staying faithful to the actual application architecture and current project code.
