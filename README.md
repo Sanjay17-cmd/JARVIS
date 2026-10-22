@@ -322,12 +322,16 @@ Log files: `%APPDATA%\JARVIS\logs\jarvis.log`
 ## Packaging and portability
 
 The current `JARVIS.spec` uses PyInstaller's `COLLECT` mode and produces an
-**onedir distribution**, not a single portable EXE. It has not been built or
-validated as a distributable package. A build also needs the referenced asset
-folders and icon to exist, and optional speech recognition/model resources may
-need separate setup. API credentials are stored in the Windows Credential
-Manager and do not automatically transfer to another PC; configure credentials
-there after installation. Do not package API keys in the executable.
+**onedir distribution**, not a single portable EXE. Build it on 64-bit Windows
+with the documented PyInstaller command. The packaged app uses user-writable
+data under `%APPDATA%\JARVIS`; do not copy that data directory into the release.
+API credentials are stored in Windows Credential Manager and do not transfer
+with the app. Configure your own credentials after installation. Never package
+API keys or a local `.env` file.
+
+See [WINDOWS_RELEASE.md](./WINDOWS_RELEASE.md) for extraction, configuration,
+storage locations, updating, troubleshooting, and the distinction between
+automated checks and checks that still need your PC, credentials, or hardware.
 
 ---
 
@@ -360,15 +364,17 @@ there after installation. Do not package API keys in the executable.
 
 ---
 
-## Future EXE Packaging
-
-> ⚠ Build and test first. Only package once the app is verified.
+## Windows EXE Packaging
 
 ```powershell
-pip install pyinstaller
-pyinstaller JARVIS.spec
-# Output: dist/JARVIS/JARVIS.exe
+python -m pip install -r requirements.txt
+python -m PyInstaller --noconfirm JARVIS.spec
+# Output: dist\JARVIS\JARVIS.exe
 ```
+
+For the complete release procedure and current verification status, see
+[WINDOWS_RELEASE.md](./WINDOWS_RELEASE.md) and
+[RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md).
 
 ---
 

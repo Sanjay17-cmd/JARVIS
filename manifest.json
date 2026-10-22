@@ -1,0 +1,382 @@
+{
+  "name": "JARVIS_Robot",
+  "version": 1,
+  "generator": "build_jarvis_robot.py",
+  "blender_target": "4.2 LTS or newer",
+  "canvas": {
+    "width": 300,
+    "height": 300,
+    "aspect": "1:1",
+    "camera": "orthographic, fixed",
+    "background": "transparent (RGBA PNG)"
+  },
+  "fps": 30,
+  "aliases": {
+    "fly": "flying",
+    "repair": "tools",
+    "scan": "scanning"
+  },
+  "animations": [
+    {
+      "id": "idle",
+      "frames": 60,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "state",
+      "trigger": "Default resting state",
+      "aliases": [],
+      "folder": "animations/idle",
+      "frame_pattern": "animations/idle/idle_{index:03d}.png",
+      "first_frame": "animations/idle/idle_000.png",
+      "last_frame": "animations/idle/idle_059.png"
+    },
+    {
+      "id": "listening",
+      "frames": 40,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "state",
+      "trigger": "Listening / voice capture",
+      "aliases": [],
+      "folder": "animations/listening",
+      "frame_pattern": "animations/listening/listening_{index:03d}.png",
+      "first_frame": "animations/listening/listening_000.png",
+      "last_frame": "animations/listening/listening_039.png"
+    },
+    {
+      "id": "thinking",
+      "frames": 40,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "state",
+      "trigger": "Processing a request",
+      "aliases": [],
+      "folder": "animations/thinking",
+      "frame_pattern": "animations/thinking/thinking_{index:03d}.png",
+      "first_frame": "animations/thinking/thinking_000.png",
+      "last_frame": "animations/thinking/thinking_039.png"
+    },
+    {
+      "id": "speaking",
+      "frames": 40,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "state",
+      "trigger": "Speaking a response",
+      "aliases": [],
+      "folder": "animations/speaking",
+      "frame_pattern": "animations/speaking/speaking_{index:03d}.png",
+      "first_frame": "animations/speaking/speaking_000.png",
+      "last_frame": "animations/speaking/speaking_039.png"
+    },
+    {
+      "id": "success",
+      "frames": 30,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": false,
+      "kind": "alert",
+      "trigger": "Brief success alert",
+      "aliases": [],
+      "folder": "animations/success",
+      "frame_pattern": "animations/success/success_{index:03d}.png",
+      "first_frame": "animations/success/success_000.png",
+      "last_frame": "animations/success/success_029.png"
+    },
+    {
+      "id": "error",
+      "frames": 30,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": false,
+      "kind": "alert",
+      "trigger": "Brief error alert",
+      "aliases": [],
+      "folder": "animations/error",
+      "frame_pattern": "animations/error/error_{index:03d}.png",
+      "first_frame": "animations/error/error_000.png",
+      "last_frame": "animations/error/error_029.png"
+    },
+    {
+      "id": "paused",
+      "frames": 20,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "state",
+      "trigger": "Paused / low energy",
+      "aliases": [],
+      "folder": "animations/paused",
+      "frame_pattern": "animations/paused/paused_{index:03d}.png",
+      "first_frame": "animations/paused/paused_000.png",
+      "last_frame": "animations/paused/paused_019.png"
+    },
+    {
+      "id": "wave",
+      "frames": 24,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": false,
+      "kind": "override",
+      "trigger": "Greeting wave",
+      "aliases": [],
+      "folder": "animations/wave",
+      "frame_pattern": "animations/wave/wave_{index:03d}.png",
+      "first_frame": "animations/wave/wave_000.png",
+      "last_frame": "animations/wave/wave_023.png"
+    },
+    {
+      "id": "flying",
+      "frames": 24,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "override",
+      "trigger": "Flying / hover",
+      "aliases": [
+        "fly"
+      ],
+      "folder": "animations/flying",
+      "frame_pattern": "animations/flying/flying_{index:03d}.png",
+      "first_frame": "animations/flying/flying_000.png",
+      "last_frame": "animations/flying/flying_023.png"
+    },
+    {
+      "id": "tools",
+      "frames": 24,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "override",
+      "trigger": "Repair / tool use",
+      "aliases": [
+        "repair"
+      ],
+      "folder": "animations/tools",
+      "frame_pattern": "animations/tools/tools_{index:03d}.png",
+      "first_frame": "animations/tools/tools_000.png",
+      "last_frame": "animations/tools/tools_023.png"
+    },
+    {
+      "id": "scanning",
+      "frames": 24,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "override",
+      "trigger": "Scanning",
+      "aliases": [
+        "scan"
+      ],
+      "folder": "animations/scanning",
+      "frame_pattern": "animations/scanning/scanning_{index:03d}.png",
+      "first_frame": "animations/scanning/scanning_000.png",
+      "last_frame": "animations/scanning/scanning_023.png"
+    },
+    {
+      "id": "typing",
+      "frames": 24,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "override",
+      "trigger": "Typing",
+      "aliases": [],
+      "folder": "animations/typing",
+      "frame_pattern": "animations/typing/typing_{index:03d}.png",
+      "first_frame": "animations/typing/typing_000.png",
+      "last_frame": "animations/typing/typing_023.png"
+    },
+    {
+      "id": "thirsty",
+      "frames": 24,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": false,
+      "kind": "override",
+      "trigger": "Hydration reminder",
+      "aliases": [],
+      "folder": "animations/thirsty",
+      "frame_pattern": "animations/thirsty/thirsty_{index:03d}.png",
+      "first_frame": "animations/thirsty/thirsty_000.png",
+      "last_frame": "animations/thirsty/thirsty_023.png"
+    },
+    {
+      "id": "focus",
+      "frames": 24,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "override",
+      "trigger": "Focus mode",
+      "aliases": [],
+      "folder": "animations/focus",
+      "frame_pattern": "animations/focus/focus_{index:03d}.png",
+      "first_frame": "animations/focus/focus_000.png",
+      "last_frame": "animations/focus/focus_023.png"
+    },
+    {
+      "id": "alarm",
+      "frames": 24,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": true,
+      "kind": "override",
+      "trigger": "Urgent alarm / reminder",
+      "aliases": [],
+      "folder": "animations/alarm",
+      "frame_pattern": "animations/alarm/alarm_{index:03d}.png",
+      "first_frame": "animations/alarm/alarm_000.png",
+      "last_frame": "animations/alarm/alarm_023.png"
+    },
+    {
+      "id": "confused",
+      "frames": 24,
+      "fps": 30,
+      "width": 300,
+      "height": 300,
+      "format": "PNG",
+      "alpha": true,
+      "loop": false,
+      "kind": "override",
+      "trigger": "Confused / did not understand",
+      "aliases": [],
+      "folder": "animations/confused",
+      "frame_pattern": "animations/confused/confused_{index:03d}.png",
+      "first_frame": "animations/confused/confused_000.png",
+      "last_frame": "animations/confused/confused_023.png"
+    }
+  ],
+  "chest_buttons": {
+    "coordinate_convention": "normalised 0..1 of the square canvas; x from left, y from TOP",
+    "overlay_inset_px": 10,
+    "overlay_inset_note": "The existing painter draws the robot with a 10 px inset inside the overlay window; apply that inset when converting to window pixels.",
+    "assumption": "Anchors are used verbatim. The four LED meshes are placed exactly at these canvas positions by the orthographic camera mapping, so the robot body is centred on the LED row (x = 0.598), not on x = 0.5. Calibrate in the app if its report intended another convention.",
+    "buttons": [
+      {
+        "index": 1,
+        "id": "voice",
+        "label": "Voice",
+        "default_color": "#B84DFF",
+        "nx": 0.474,
+        "ny": 0.868
+      },
+      {
+        "index": 2,
+        "id": "focus",
+        "label": "Focus",
+        "default_color": "#2878FF",
+        "nx": 0.557,
+        "ny": 0.868
+      },
+      {
+        "index": 3,
+        "id": "reminders",
+        "label": "Reminders",
+        "default_color": "#FFB000",
+        "nx": 0.639,
+        "ny": 0.868
+      },
+      {
+        "index": 4,
+        "id": "actions",
+        "label": "Actions",
+        "default_color": "#FF4FA3",
+        "nx": 0.722,
+        "ny": 0.868
+      }
+    ]
+  },
+  "palette_rgb": {
+    "body_dark": [
+      20,
+      40,
+      70
+    ],
+    "body_mid": [
+      30,
+      60,
+      100
+    ],
+    "body_light": [
+      50,
+      90,
+      140
+    ],
+    "visor_bg": [
+      5,
+      15,
+      35
+    ],
+    "visor_edge": [
+      0,
+      200,
+      255
+    ],
+    "eye_glow": [
+      0,
+      230,
+      255
+    ],
+    "chest_panel": [
+      10,
+      25,
+      55
+    ],
+    "led_active": [
+      0,
+      255,
+      200
+    ]
+  },
+  "frame_naming": "<id>_NNN.png, zero-padded 3 digits, starting at 000"
+}

@@ -9,6 +9,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+release/
 eggs/
 parts/
 var/
@@ -52,6 +53,11 @@ settings.json
 .env
 .env.*
 !.env.example
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
 
 # Windows
 Thumbs.db

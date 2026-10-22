@@ -1,0 +1,11 @@
+JARVIS for Windows (64-bit)
+
+1. Extract the complete JARVIS folder from this ZIP to a writable location.
+2. Keep JARVIS.exe beside its _internal folder; do not move the EXE alone.
+3. Run JARVIS.exe. No separate Python installation is required.
+4. Configure your own provider credentials in Settings. No API keys are
+   included in this archive.
+5. User data and logs are stored under %APPDATA%\JARVIS.
+
+See WINDOWS_RELEASE.md in the source repository for detailed setup,
+troubleshooting, update instructions, and verification limits.

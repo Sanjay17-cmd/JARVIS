@@ -1,11 +1,16 @@
-# JARVIS.spec — PyInstaller spec for future EXE packaging
+# JARVIS.spec — PyInstaller spec for Windows EXE packaging
 # Build with: pyinstaller JARVIS.spec
-# NOTE: Do not run this until Phase 1 is fully verified.
 
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
+voice_hiddenimports = (
+    collect_submodules('faster_whisper')
+    + collect_submodules('sounddevice')
+    + collect_submodules('pyttsx3')
+)
 
 a = Analysis(
     ['main.py'],
@@ -15,6 +20,7 @@ a = Analysis(
         ('jarvis/assets/images', 'jarvis/assets/images'),
         ('jarvis/assets/icons',  'jarvis/assets/icons'),
         ('jarvis/assets/sounds', 'jarvis/assets/sounds'),
+        ('jarvis/config/default_configs', 'jarvis/config/default_configs'),
     ],
     hiddenimports=[
         'PySide6.QtCore',
@@ -24,13 +30,18 @@ a = Analysis(
         'PIL.Image',
         'PIL.ImageDraw',
         'PIL.ImageFilter',
-    ],
+        'numpy',
+        'sounddevice',
+        'faster_whisper',
+        'pyttsx3',
+    ] + voice_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         'mediapipe', 'cv2', 'sherpa_onnx', 'openai', 'anthropic',
-        'tkinter', 'matplotlib', 'numpy',
+        'tkinter', 'matplotlib', 'IPython', 'jupyter', 'nbformat',
+        'pandas', 'pyarrow', 'scipy', 'sqlalchemy', 'zmq',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -55,7 +66,6 @@ exe = EXE(
     target_arch='x86_64',
     codesign_identity=None,
     entitlements_file=None,
-    icon='jarvis/assets/icons/jarvis.ico',   # add .ico in Phase 1b
 )
 
 coll = COLLECT(
