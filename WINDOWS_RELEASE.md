@@ -9,6 +9,21 @@
 - Microphone and a compatible Windows speech voice are needed for voice input
   and text-to-speech respectively.
 
+## Rebuild the release
+
+On a 64-bit Windows build machine with Python installed:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m PyInstaller --noconfirm JARVIS.spec
+New-Item -ItemType Directory -Force release | Out-Null
+Compress-Archive -Path dist\JARVIS,INSTALL.txt `
+  -DestinationPath release\JARVIS-Windows-x64.zip -CompressionLevel Optimal
+```
+
+The build output is `dist\JARVIS\JARVIS.exe`. Do not include `.env`, local
+databases, logs, or the `%APPDATA%\JARVIS` user-data directory in the ZIP.
+
 ## Install and launch
 
 1. Download `JARVIS-Windows-x64.zip` from the release handoff.
