@@ -89,11 +89,24 @@ class AIGateway:
             self._credential_store = CredentialStore()
         return self._credential_store.get(credential_id)
 
+    def get_api_key(self, provider: str) -> str | None:
+        """Return the configured key for a provider without exposing credential metadata."""
+        primary = self.settings.get("ai_primary_provider") == provider
+        credential_id = (
+            str(self.settings.get("ai_primary_credential_id", ""))
+            if primary else ""
+        )
+        secret, _entry = self._credential_for_route(
+            provider, credential_id, is_primary=primary
+        )
+        return secret
+
     def _environment_key(self, provider: str, is_primary: bool) -> str | None:
         default_names = {
             "gemini": "GEMINI_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
             "grok": "XAI_API_KEY",
+            "groq": "GROQ_API_KEY",
             "openai": "OPENAI_API_KEY",
         }
         if is_primary:
@@ -128,6 +141,9 @@ class AIGateway:
         return self._environment_key(provider, is_primary), None
 
     def _route_specs(self) -> list[dict[str, Any]]:
+        if self.settings.get("ai_chat_free_only", False):
+            return self._free_only_route_specs()
+
         provider = str(
             self.settings.get(
                 "ai_primary_provider", self.settings.get("ai_provider", "gemini")
@@ -142,7 +158,8 @@ class AIGateway:
         if provider not in self.adapters:
             raise ProviderError(
                 provider, "provider_unavailable",
-                f"Unsupported AI provider '{provider}'. Choose Gemini, OpenRouter, or Grok.",
+                f"Unsupported AI provider '{provider}'. Choose Gemini, OpenRouter, "
+                "Grok (xAI), or Groq.",
             )
         enabled_providers = self.settings.get("ai_provider_enabled", {})
         if not enabled_providers.get(provider, True):
@@ -187,22 +204,86 @@ class AIGateway:
         max_routes = max(0, int(self.settings.get("ai_max_fallback_attempts", 3)))
         return unique[:max_routes + 1]
 
+    def _free_only_route_specs(self) -> list[dict[str, Any]]:
+        if not self.settings.get("ai_provider_enabled", {}).get("openrouter", True):
+            raise ProviderError(
+                "openrouter",
+                "provider_unavailable",
+                "Free-only chat is enabled, but OpenRouter is disabled in AI settings.",
+            )
+        from jarvis.ai.free_models import (
+            FreeModelCatalogError,
+            list_free_openrouter_models,
+        )
+
+        try:
+            models = list_free_openrouter_models(
+                "text",
+                timeout=max(1, min(int(self.settings.get("ai_timeout", 30)), 30)),
+            )
+        except FreeModelCatalogError as exc:
+            self.last_status = str(exc)
+            raise ProviderError(
+                "openrouter", "provider_unavailable", str(exc)
+            ) from exc
+        if not models:
+            self.last_status = (
+                "No verified zero-priced OpenRouter text models are currently available."
+            )
+            raise ProviderError(
+                "openrouter", "unsupported_model", self.last_status
+            )
+        store.save_model_catalog("openrouter", models)
+        configured_model = ""
+        if self.settings.get("ai_primary_provider") == "openrouter":
+            configured_model = str(self.settings.get("ai_primary_model", ""))
+        available_ids = {model["id"] for model in models}
+        model = (
+            configured_model
+            if configured_model in available_ids
+            else models[0]["id"]
+        )
+        primary_provider = self.settings.get("ai_primary_provider") == "openrouter"
+        credential_id = (
+            str(self.settings.get("ai_primary_credential_id", ""))
+            if primary_provider else ""
+        )
+        return [{
+            "provider": "openrouter",
+            "model": model,
+            "credential_id": credential_id,
+            "primary": primary_provider,
+        }]
+
     def _context(
         self, prompt: str
     ) -> tuple[str, list[dict[str, str]], str, str]:
         conversation_id = database.active_conversation_id()
         all_messages = database.conversation_messages(conversation_id)
         prior_messages = list(all_messages)
-        if prior_messages and prior_messages[-1]["role"] == "user":
-            if prior_messages[-1]["content"].strip() == prompt.strip():
-                prior_messages.pop()
+        normalized_prompt = store.normalize_prompt(prompt)
+        if (
+            prior_messages
+            and prior_messages[-1]["role"] == "user"
+            and store.normalize_prompt(str(prior_messages[-1]["content"]))
+            == normalized_prompt
+        ):
+            prior_messages.pop()
+        if (
+            len(prior_messages) >= 2
+            and prior_messages[-1]["role"] == "assistant"
+            and prior_messages[-2]["role"] == "user"
+            and store.normalize_prompt(str(prior_messages[-2]["content"]))
+            == normalized_prompt
+        ):
+            prior_messages = prior_messages[:-2]
 
         threshold = max(6, int(self.settings.get("ai_summary_threshold", 30)))
         recent_count = max(1, int(self.settings.get("ai_recent_message_count", 8)))
-        if len(all_messages) >= threshold:
+        if len(prior_messages) >= threshold:
             store.update_extractive_summary(
                 conversation_id,
-                all_messages,
+                prior_messages,
                 max(1, int(self.settings.get("ai_summary_recent_messages", recent_count))),
             )
         summary = store.get_summary(conversation_id)
@@ -242,6 +323,7 @@ class AIGateway:
     def _selected_model(self, route: dict[str, Any], prompt: str) -> str:
         if (
             route["primary"]
+            and not self.settings.get("ai_chat_free_only", False)
             and self.settings.get("ai_advanced_route_enabled", False)
             and _COMPLEX_PATTERNS.search(prompt)
         ):
@@ -250,12 +332,18 @@ class AIGateway:
                 return advanced
         return route["model"]
 
+    def context_fingerprint(self, prompt: str) -> tuple[str, str]:
+        """Return context identity for auxiliary caches sharing this chat policy."""
+        _system, _messages, fingerprint_value, conversation_id = self._context(prompt)
+        return fingerprint_value, conversation_id
+
     def generate(
         self,
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
         cancel_event: Event | None = None,
         on_reset: Callable[[], None] | None = None,
+        use_cache: bool = True,
     ) -> str:
         prompt = prompt.strip()
         if not prompt:
@@ -267,7 +355,8 @@ class AIGateway:
         routes = self._route_specs()
         primary_model = self._selected_model(routes[0], prompt)
         cacheable = bool(
-            self.settings.get("ai_cache_enabled", True)
+            use_cache
+            and self.settings.get("ai_cache_enabled", True)
             and not _NO_CACHE_PATTERNS.search(prompt)
         )
         output_limit = max(1, int(self.settings.get("ai_max_output_tokens", 512)))

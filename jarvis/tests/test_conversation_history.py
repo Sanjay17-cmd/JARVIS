@@ -27,6 +27,24 @@ def test_conversation_history_round_trip_and_limit(tmp_path, monkeypatch):
     ]
 
 
+def test_conversation_history_persists_assistant_model_label():
+    database.save_conversation_message(
+        "assistant",
+        "Hello",
+        2.0,
+        model_label="openrouter · provider/model",
+    )
+
+    assert database.load_conversation_history() == [
+        {
+            "role": "assistant",
+            "content": "Hello",
+            "created_at": 2.0,
+            "model_label": "openrouter · provider/model",
+        }
+    ]
+
+
 def test_new_conversations_keep_separate_messages_and_restore_active_chat():
     first = database.create_conversation("First", activate=True)
     database.save_conversation_message("user", "first chat", time.time())

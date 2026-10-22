@@ -315,21 +315,13 @@ class OpenRouterAdapter(ProviderAdapter):
 
     def list_models(self, api_key: str, timeout: int) -> list[dict]:
         result = self._request_json(f"{self._base}/models", api_key, timeout)
+        from jarvis.ai.free_models import is_verified_free_model
+
         models = []
         for item in result.get("data", []):
             model_id = str(item.get("id", ""))
             if model_id:
-                pricing = item.get("pricing", {})
-                try:
-                    zero_pricing = (
-                        float(pricing.get("prompt", -1)) == 0
-                        and float(pricing.get("completion", -1)) == 0
-                    )
-                except (TypeError, ValueError):
-                    zero_pricing = False
-                free = model_id.endswith(":free") or (
-                    zero_pricing
-                )
+                free = is_verified_free_model(item, "text")
                 models.append({
                     "id": model_id,
                     "name": item.get("name", model_id),
@@ -379,6 +371,13 @@ class OpenAIAdapter(OpenRouterAdapter):
 
     provider_id = "openai"
     _base = "https://api.openai.com/v1"
+
+
+class GroqAdapter(OpenAIAdapter):
+    """GroqCloud's OpenAI-compatible chat completions API."""
+
+    provider_id = "groq"
+    _base = "https://api.groq.com/openai/v1"
 
 
 def _openai_compatible_generation(
@@ -438,4 +437,5 @@ ADAPTERS: dict[str, ProviderAdapter] = {
     "openrouter": OpenRouterAdapter(),
     "grok": GrokAdapter(),
     "openai": OpenAIAdapter(),
+    "groq": GroqAdapter(),
 }

@@ -28,6 +28,11 @@ Setup, enable voice, choose a microphone and model, then explicitly initialize t
 model. The first model initialization may download it to the faster-whisper cache.
 You can also browse to a local model directory. Audio recognition remains local;
 the optional `pyttsx3` TTS backend is enabled from Voice Setup.
+Voice Setup supports English plus Tamil, Telugu, Kannada, and Malayalam
+recognition with multilingual Whisper models. For South Indian languages, use
+`tiny`, `base`, or `small` rather than an English-only `.en` model. Spoken
+responses need a compatible Windows TTS voice installed on that PC. Keep
+“Keep listening after each reply” enabled for hands-free follow-up commands.
 
 ### 3. Run JARVIS
 ```powershell
@@ -80,10 +85,12 @@ Opens the interaction panel. Type commands:
 
 ### Right-click the robot
 Opens the context menu with: Open Panel, Pause, Reset Position, Settings, Hide, Exit.
-The chest microphone button opens a separate voice-chat window and starts/stops
-push-to-talk without opening the main interaction panel. Use **New Chat** or the
-conversation selector to start a conversation or return to an older one. The
-other chest buttons control focus, open reminders, and open the task manager.
+The chest microphone button toggles hands-free listening without opening a chat
+window. JARVIS records one phrase at a time and submits it after the configured
+silence interval, then listens again while the session remains active. Use
+Settings → AI & Voice → Voice Setup to enable voice, choose a model/microphone,
+set the silence interval, and decide whether talking interrupts spoken replies.
+The other chest buttons control focus, open reminders, and open the task manager.
 
 ### System Tray
 Look for the **J** icon in the system tray (bottom-right). 
@@ -104,7 +111,8 @@ enabled.
 **Notifications** provides a master toggle and category switches for reminders,
 alarms, focus, wellness, and other notifications. Due reminders can also appear
 in the chat. Desktop notification toasts appear in the bottom-right; the robot
-shows a reminder bubble with a matching animation.
+shows a cyan outlined speech bubble beside itself with an **ALERT!** label and
+the reminder title, alongside the matching robot animation.
 
 The settings window's bottom scrolling legend explains chest-button colors:
 purple for Voice, blue for Focus, amber for Reminders, and pink for Actions.
@@ -132,16 +140,26 @@ Settings are saved to: `%APPDATA%\JARVIS\settings.json`
 - The configurable AI Trigger Keyword (initially `Friday`) invokes the configured
   AI provider for the remainder of the request. Unprefixed registered local
   commands such as `Open Chrome` and `Remind me in 5 seconds` remain local actions.
-- Open **AI Pipeline Settings** to configure Gemini, OpenRouter, and xAI Grok.
+- Open **AI Pipeline Settings** to configure Gemini, OpenRouter, xAI Grok, and Groq.
   Refresh the provider's model catalogue to see account-available models; OpenRouter
   models can be filtered to free entries. Configure ordered fallbacks, retry/timeout
   limits, context size, cache retention, summaries, and saved user-approved memory.
+- **Free-only AI chat** is enabled by default. It routes chat only to OpenRouter
+  models whose IDs end in `:free`, whose text output is listed in the model catalog,
+  and whose published prices are all zero. It checks the catalog before every
+  request and never falls back to Gemini, Grok, Groq, or a paid model. If no verified
+  free model or OpenRouter key is available, it reports an error instead. Groq is
+  supported as a provider using `GROQ_API_KEY`, but the Groq model catalog does not
+  publish the zero-price metadata required by this strict mode; disable free-only
+  mode in AI Pipeline Settings to use Groq. Groq's account-level free tier/rate
+  limits depend on the account and are not a proof of zero billing.
 - Existing OpenAI settings are migrated through the same gateway for compatibility;
   OpenAI is shown in the provider list only for a migrated legacy configuration.
 - Add API keys in **Credentials**. Stored keys use Windows Credential Manager;
   only labels, provider/project metadata, and credential IDs are saved in Settings.
   Alternatively, copy `.env.example` to `.env` and set `GEMINI_API_KEY`,
-  `OPENROUTER_API_KEY`, or `XAI_API_KEY`. The local `.env` is ignored by Git.
+  `OPENROUTER_API_KEY`, `XAI_API_KEY`, or `GROQ_API_KEY`. The local `.env` is
+  ignored by Git.
 - AI results and summaries are stored in the local SQLite database. Eligible exact
   responses are cached with context-aware keys; time-sensitive/current-information
   prompts are excluded. Cached answers are not live provider checks.
@@ -154,15 +172,97 @@ Settings are saved to: `%APPDATA%\JARVIS\settings.json`
   deliberately unavailable model; verify rate-limit/quota behavior with an account
   where safe. Mocked tests cannot validate real credentials, project quota policy,
   billing, or current catalogue availability.
+- Configure live search in Settings → **Web Search**. Choose Brave Search,
+  Tavily, or OpenRouter Web Search, set its API key using the secure-key button,
+  and test the connection. Search keys are stored in Windows Credential Manager
+  under separate IDs from model-provider credentials. The chat **Search** toggle
+  forces a query; requests asking for recent/current information are searched
+  automatically. Returned sources are linked in chat. Search results and stable
+  summaries use separate configurable caches; news defaults to a shorter cache.
+  Search-backed answers with returned source links are marked with a 🌐 prefix;
+  local predefined responses keep their ◆ marker.
+- **When search runs:** turn on the chat's **Search** button to force web search
+  for that message, or ask for current/recent information (for example, latest
+  releases, current news, research, comparisons, or verification) for automatic
+  search. Starting with the configured AI trigger word (such as “Friday”) uses
+  the AI pipeline; if that request is also search-related, it searches the web.
+- **When normal AI runs:** ordinary questions without the Search toggle, search
+  intent, or a local built-in command use the configured AI provider directly.
+  Common greetings and registered local commands are handled locally first,
+  unless the Search toggle or AI trigger explicitly requests the AI path. If web
+  search is unavailable or fails, JARVIS reports the failure rather than
+  presenting an unsourced answer as searched.
 - The settings window is split into General, Notifications, AI & Voice, and
   Focus & Tools sections. Installed TTS voices are listed by the local Windows
   speech backend; availability depends on voices installed on that PC.
+- **AI Action History** shows recent tool names, outcomes, and error codes without
+  recording arguments, API keys, or returned task content. It records affected
+  record IDs and a concise status/result category where available.
+- In **AI & Voice**, “Allow spoken commands to perform application actions” can
+  disable voice-triggered actions while leaving spoken chat replies available.
+- **Built-in Responses** is a settings section for adding local replies by key or
+  importing CSV rows with `key,response` columns. Greetings such as “hi” and
+  “how are you” have local replies; unmatched requests continue to the configured
+  AI fallback. A small diamond marks local predefined replies in chat, including
+  alarm command replies.
 - Reminder/alarm definitions and wellness intervals persist in the local SQLite
   store. Due notifications are delivered while JARVIS is running; reminders cannot
   fire when the process is closed or the computer is powered off.
 - Utility dialogs use the robot's opacity and can be dragged from non-control
   areas; buttons, text fields, lists, and other interactive controls keep their
   normal click/edit behavior. The chat panel is unchanged.
+
+### Phase 3: web search and application actions
+
+- Web search uses independently configured Brave, Tavily, or OpenRouter Search
+  credentials. The Search button forces a search; current-information requests
+  may also be routed automatically. Sources are linked in chat only when the
+  configured service returned them. Search has separate result and summary
+  caches from the AI response cache.
+- Typed requests and recognized speech use the same command router and AI
+  gateway. Tool-capable requests are converted to a strict JSON plan, validated
+  against registered schemas, and executed through the existing task,
+  reminder/alarm, Focus, saved-memory, and app services. Ordinary chat without
+  an action-intent keyword goes directly through the existing gateway to avoid
+  the extra planning prompt.
+- The registry verifies persisted task, reminder, alarm, and Focus-rule changes.
+  Relative dates use the machine's local timezone. Repeated records with the
+  same displayed title trigger a clarification rather than selecting by list
+  order. Before creating, updating, completing, reopening, snoozing, dismissing,
+  cancelling, deleting, changing Focus, saving notes, opening apps, or playing
+  animations, or copying text to the clipboard, JARVIS shows the proposed change
+  with **Yes** and **No** buttons. Clipboard approval displays the exact text to
+  be copied. The operation is not executed until approved. You can also say or
+  type “yes” or “no” in the same conversation. Saying “no” leaves stored data
+  and the clipboard unchanged.
+- Voice action permission is configurable in Settings. Transcribed requests
+  still appear in chat, and enabled TTS reads the final response. When speech
+  interruption is enabled, speaking stops the current TTS output; the microphone
+  stays/reopens for the next request, and the new request receives its own
+  response. This relies on the optional local microphone/recognition/TTS setup
+  described above.
+- The action planner currently performs at most one registered tool per turn.
+  It does not execute generated code or shell commands. Windows microphone,
+  TTS voice availability, provider credentials, billing/quota, and live search
+  results require validation on the target machine; mocked tests do not prove
+  those external integrations.
+- The chat panel's **Image** button opens an OpenRouter image-generation window.
+  Add an OpenRouter key in AI Pipeline Settings and enter a prompt. The model
+  selector lists only image models whose OpenRouter catalog ID ends in `:free`
+  and whose published prices are all zero; the catalog is checked again before
+  every generation. If no model passes those checks, generation is disabled and
+  no paid fallback is attempted. Generated images are saved under
+  `%APPDATA%\JARVIS\generated_images`; use **Save As…** for another location.
+  **Copy Image** asks for confirmation before putting the image on the Windows
+  clipboard. Free model availability may change. Nano Banana is not treated as
+  free unless OpenRouter lists that exact image model as a zero-priced `:free`
+  endpoint.
+  OpenRouter documents the image API at
+  [Image Generation](https://openrouter.ai/docs/guides/overview/multimodal/image-generation).
+- Each assistant reply shows its provider/model in a small caption below the
+  response; the caption is saved with chat history. Built-in/local replies are
+  labelled accordingly. The chat window is wider, and Settings has been widened
+  to make the section controls and text easier to read.
 
 ---
 

@@ -10,8 +10,8 @@ Performance (Part L):
 
 Part K — chest button indicators:
   • set_chest_indicator(btn_id, color_or_none) — called by mic/camera/focus services
-  • Voice btn: green=active, red=muted, cyan=idle
-  • Camera btn: green=active, red=disabled, cyan=idle
+  • Voice btn: purple=idle, cyan=listening, red=muted
+  • Reminder alert: animated cyan speech bubble beside the robot
 
 Part A — live robot resize:
   • set_robot_size(n): regenerates frames on QThread, resizes window, no restart needed
@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt, QPoint, QTimer, QRect, Signal, Slot, QThread, QObject
 from PySide6.QtGui import (
     QPixmap, QPainter, QColor, QMouseEvent, QPaintEvent,
-    QGuiApplication, QScreen, QPen,
+    QGuiApplication, QScreen, QPen, QPainterPath, QPolygon,
 )
 from PySide6.QtWidgets import QWidget, QMenu, QLabel, QApplication
 
@@ -139,6 +139,58 @@ class _ChestButton:
         return self.indicator_color if self.indicator_color else self.color
 
 
+class _ReminderBubble(QWidget):
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(
+            parent,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.NoDropShadowWindowHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setFixedSize(184, 72)
+        self._label = QLabel(self)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setWordWrap(True)
+        self._label.setStyleSheet(
+            "QLabel{color:#8ceeff;background:transparent;"
+            "font-family:'Consolas','Courier New',monospace;"
+            "font-size:12px;font-weight:bold;padding:4px;}"
+        )
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+
+    def set_message(self, title: str, duration_ms: int) -> None:
+        short_title = title.strip()
+        if len(short_title) > 28:
+            short_title = short_title[:25].rstrip() + "..."
+        self._label.setText(f"ALERT!\n{short_title}")
+        self._timer.start(duration_ms)
+        self.show()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        self._label.setGeometry(14, 7, self.width() - 25, self.height() - 22)
+        super().resizeEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bubble = QPainterPath()
+        bubble.addRoundedRect(2, 2, self.width() - 4, self.height() - 17, 13, 13)
+        bubble.moveTo(34, self.height() - 16)
+        bubble.lineTo(27, self.height() - 2)
+        bubble.lineTo(49, self.height() - 17)
+        bubble.closeSubpath()
+        painter.fillPath(bubble, QColor(3, 43, 61, 242))
+        painter.setPen(QPen(QColor("#24E7FF"), 3))
+        painter.drawPath(bubble)
+        painter.end()
+
+
 # ── Overlay ───────────────────────────────────────────────────────────────────
 
 class RobotOverlay(QWidget):
@@ -208,6 +260,10 @@ class RobotOverlay(QWidget):
         self._status_label.setWordWrap(True)
         self._status_label.setVisible(False)
         self._status_label.setGeometry(0, self._win_size - 24, self._win_size, 20)
+        self._reminder_bubble = _ReminderBubble(self)
+        self._reminder_bubble.setWindowOpacity(
+            float(settings.get("opacity", 0.9))
+        )
 
         # Loading placeholder shown while frames generate
         self._loading_label = QLabel("⚙ Loading…", self)
@@ -428,25 +484,16 @@ class RobotOverlay(QWidget):
         else:
             self._hide_status()
 
+    def set_overlay_opacity(self, opacity: float) -> None:
+        value = max(0.0, min(float(opacity), 1.0))
+        self.setWindowOpacity(value)
+        self._reminder_bubble.setWindowOpacity(value)
+
     def show_reminder_bubble(
         self, title: str, description: str = "", duration_ms: int = 8000
     ) -> None:
-        message = f"🔔 Reminder: {title}"
-        self._status_label.setText(message)
-        self._status_label.setToolTip(
-            f"{message}\n{description}" if description else message
-        )
-        self._status_label.setStyleSheet(
-            "QLabel{color:#fff4d6;font-size:11px;font-weight:bold;"
-            "font-family:'Segoe UI',Arial;background:rgba(88,42,0,235);"
-            "border:1px solid #ffb000;border-radius:10px;padding:4px 8px;}"
-        )
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status_label.setGeometry(
-            6, self._win_size - 42, self._win_size - 12, 36
-        )
-        self._status_label.setVisible(True)
-        self._status_hide_timer.start(duration_ms)
+        self._reminder_bubble.set_message(title, duration_ms)
+        self._position_reminder_bubble()
 
     @Slot()
     def _hide_status(self) -> None:
@@ -459,10 +506,25 @@ class RobotOverlay(QWidget):
         )
         self._status_label.setGeometry(0, self._win_size - 24, self._win_size, 20)
 
+    def _position_reminder_bubble(self) -> None:
+        if not self._reminder_bubble.isVisible():
+            return
+        robot = self.frameGeometry()
+        screen = QGuiApplication.screenAt(robot.center())
+        screen = screen or QGuiApplication.primaryScreen()
+        bounds = screen.availableGeometry()
+        bubble = self._reminder_bubble
+        x = robot.right() - 35
+        y = robot.top() - 18
+        x = max(bounds.left() + 8, min(x, bounds.right() - bubble.width() + 1))
+        y = max(bounds.top() + 8, min(y, bounds.bottom() - bubble.height() + 1))
+        bubble.move(x, y)
+
     # ── SINGLE master tick (animation + movement combined) ────────────────────
 
     @Slot()
     def _master_tick(self) -> None:
+        self._position_reminder_bubble()
         needs_repaint = False
 
         # --- Animation frame advance ---

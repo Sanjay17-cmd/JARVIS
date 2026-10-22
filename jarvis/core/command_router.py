@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import random
+import inspect
 from threading import Event
 from datetime import datetime
 from typing import Callable
@@ -21,16 +22,35 @@ from typing import Callable
 log = logging.getLogger(__name__)
 
 CommandHandler = Callable[[str], str]
+_SEARCH_REQUEST = re.compile(
+    r"\b(search|look up|find online|latest|current|today|recent|news|"
+    r"research|papers?|compare|comparison|verify|what happened|release date|"
+    r"version of)\b",
+    re.IGNORECASE,
+)
+_LOCAL_GREETINGS = {
+    "hi", "hi jarvis", "hey", "hey jarvis", "how are you",
+    "how are you doing", "how are you today", "hi how are you",
+    "hey how are you", "good morning", "good afternoon", "good evening",
+    "hi there", "hey there", "hello there", "hello jarvis",
+    "hi jarvis how are you", "hey jarvis how are you", "good night",
+    "what's up", "whats up",
+}
 
 
 class CommandRouter:
     def __init__(self) -> None:
         self._commands: dict[str, CommandHandler] = {}
         self._ai_fallback: CommandHandler | None = None
+        self._search_handler: CommandHandler | None = None
         self._ai_stream_fallback: Callable[[str, Callable[[str], None]], str] | None = None
         self._ai_cancelable_stream_fallback: (
             Callable[[str, Callable[[str], None], Event | None, Callable[[], None] | None], str] | None
         ) = None
+        self._ai_voice_fallback: (
+            Callable[[str, Callable[[str], None], Event | None, Callable[[], None] | None], str] | None
+        ) = None
+        self._voice_actions_allowed: Callable[[], bool] | None = None
         self._ai_keywords: list[str] = []
         self._custom_commands: list[dict] = []
         self._custom_actions: dict[str, Callable[[dict], str]] = {}
@@ -60,6 +80,22 @@ class CommandRouter:
         self._ai_stream_fallback = stream_handler
         self._ai_cancelable_stream_fallback = cancelable_stream_handler
 
+    def register_search_handler(self, handler: CommandHandler | None) -> None:
+        self._search_handler = handler
+
+    def register_voice_fallback(
+        self,
+        handler: Callable[[str, Callable[[str], None], Event | None, Callable[[], None] | None], str]
+        | None,
+        actions_allowed: Callable[[], bool] | None = None,
+    ) -> None:
+        self._ai_voice_fallback = handler
+        self._voice_actions_allowed = actions_allowed
+
+    def requires_search(self, text: str, force: bool = False) -> bool:
+        query, _ = self._strip_ai_keyword(text.strip())
+        return force or bool(_SEARCH_REQUEST.search(query))
+
     def has_builtin(self, text: str) -> bool:
         """Return whether this input resolves to a registered local command."""
         try:
@@ -69,9 +105,11 @@ class CommandRouter:
             matches_custom = True
         return (
             bool(text.strip())
+            and not self._is_mutating_command(text)
             and not self._strip_ai_keyword(text)[1]
             and (
-                text.strip().lower().split()[0] in self._commands
+                self._normalize(text) in _LOCAL_GREETINGS
+                or text.strip().lower().split()[0] in self._commands
                 or matches_custom
             )
         )
@@ -83,7 +121,6 @@ class CommandRouter:
         self._responses = dict(responses)
 
     def response(self, key: str, fallback: str, **values: str) -> str:
-        self._last_response_is_predefined = True
         templates = self._responses.get(key)
         if not templates:
             return fallback.format(**values)
@@ -148,6 +185,21 @@ class CommandRouter:
         return matches[0] if matches else None
 
     def _route_local_or_custom(self, text: str) -> str | None:
+        normalized_text = self._normalize(text)
+        if normalized_text in _LOCAL_GREETINGS:
+            response_key = (
+                "how_are_you"
+                if "how are you" in normalized_text
+                else "greeting"
+            )
+            return self.response(
+                response_key,
+                (
+                    "I'm doing well and ready to help. How are you?"
+                    if response_key == "how_are_you"
+                    else "Hello! How can I help?"
+                ),
+            )
         custom = self._match_custom(text)
         if custom is not None:
             handler = self._custom_actions[custom["action"]]
@@ -177,12 +229,29 @@ class CommandRouter:
         on_chunk: Callable[[str], None],
         cancel_event: Event | None = None,
         on_reset: Callable[[], None] | None = None,
+        force_search: bool = False,
+        voice_request: bool = False,
     ) -> str:
         """Route one command and forward response chunks as they become available."""
+        self._last_response_is_predefined = False
         text = text.strip()
         if not text:
             return ""
         query, forced_ai = self._strip_ai_keyword(text)
+        if force_search or (forced_ai and self.requires_search(query)):
+            if self._search_handler is None:
+                response = (
+                    "⚠ Web search is not configured. Select a search provider and "
+                    "add its API key in Settings → Web Search."
+                )
+            else:
+                try:
+                    response = self._call_search(query, cancel_event)
+                except Exception as exc:
+                    log.exception("Web search request failed")
+                    response = f"⚠ Web search failed: {exc}"
+            on_chunk(response)
+            return response
         if forced_ai:
             if not query:
                 response = "Please add a question after the AI keyword."
@@ -200,10 +269,11 @@ class CommandRouter:
                 on_chunk(response)
                 return response
             try:
-                if self._ai_cancelable_stream_fallback:
-                    return self._ai_cancelable_stream_fallback(
-                        query, on_chunk, cancel_event, on_reset
-                    )
+                voice_response = self._call_ai_fallback(
+                    query, on_chunk, cancel_event, on_reset, voice_request
+                )
+                if voice_response is not None:
+                    return voice_response
                 if self._ai_stream_fallback:
                     return self._ai_stream_fallback(query, on_chunk)
                 response = self._ai_fallback(query)
@@ -214,6 +284,41 @@ class CommandRouter:
                 response = f"⚠ AI request failed: {exc}"
                 on_chunk(response)
                 return response
+        if (
+            voice_request
+            and not self.requires_search(text)
+            and self._ai_voice_fallback
+            and self._voice_actions_allowed
+            and not self._voice_actions_allowed()
+        ):
+            try:
+                response = self._ai_voice_fallback(
+                    text, on_chunk, cancel_event, on_reset
+                )
+            except Exception as exc:
+                log.exception("Voice chat request failed")
+                response = f"⚠ AI request failed: {exc}"
+            if response:
+                on_chunk(response)
+            return response
+        if self._is_mutating_command(text) and not self.requires_search(text):
+            response = self._call_ai_fallback(
+                text, on_chunk, cancel_event, on_reset, voice_request
+            )
+            streamed = response is not None
+            if response is None and self._ai_stream_fallback is not None:
+                response = self._ai_stream_fallback(text, on_chunk)
+                streamed = True
+            if response is None and self._ai_fallback is not None:
+                response = self._ai_fallback(text)
+            if response is None:
+                response = (
+                    "⚠ I can't perform this change safely because the AI "
+                    "confirmation service is unavailable."
+                )
+            if response and not streamed:
+                on_chunk(response)
+            return response
         key = text.lower().split()[0]
         try:
             try:
@@ -221,13 +326,29 @@ class CommandRouter:
             except ValueError as exc:
                 return f"⚠ {exc}"
             if response is not None:
+                self._last_response_is_predefined = True
                 if response:
                     on_chunk(response)
                 return response
-            if self._ai_cancelable_stream_fallback:
-                return self._ai_cancelable_stream_fallback(
-                    text, on_chunk, cancel_event, on_reset
-                )
+            if self.requires_search(text):
+                if self._search_handler is None:
+                    response = (
+                        "⚠ Web search is not configured. Select a search provider "
+                        "and add its API key in Settings → Web Search."
+                    )
+                else:
+                    try:
+                        response = self._call_search(text, cancel_event)
+                    except Exception as exc:
+                        log.exception("Web search request failed")
+                        response = f"⚠ Web search failed: {exc}"
+                on_chunk(response)
+                return response
+            voice_response = self._call_ai_fallback(
+                text, on_chunk, cancel_event, on_reset, voice_request
+            )
+            if voice_response is not None:
+                return voice_response
             if self._ai_stream_fallback:
                 return self._ai_stream_fallback(text, on_chunk)
             response = self._ai_fallback(text) if self._ai_fallback else self.route(text)
@@ -239,6 +360,53 @@ class CommandRouter:
             response = f"⚠ Error running '{key}': {exc}"
             on_chunk(response)
             return response
+
+    def _call_search(self, query: str, cancel_event: Event | None) -> str:
+        if self._search_handler is None:
+            raise RuntimeError("Web search handler is unavailable.")
+        try:
+            parameters = inspect.signature(self._search_handler).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "cancel_event" in parameters:
+            return self._search_handler(query, cancel_event=cancel_event)
+        return self._search_handler(query)
+
+    def _call_ai_fallback(
+        self,
+        prompt: str,
+        on_chunk: Callable[[str], None],
+        cancel_event: Event | None,
+        on_reset: Callable[[], None] | None,
+        voice_request: bool,
+    ) -> str | None:
+        handler = self._ai_voice_fallback if voice_request else None
+        handler = handler or self._ai_cancelable_stream_fallback
+        if handler is None:
+            return None
+        return handler(prompt, on_chunk, cancel_event, on_reset)
+
+    @staticmethod
+    def _is_mutating_command(text: str) -> bool:
+        normalized = " ".join(text.casefold().split())
+        if re.match(r"^(task)\s+\S", normalized):
+            return True
+        if re.match(r"^done\s+\d+\b", normalized):
+            return True
+        if re.match(r"^(remind|reminder)\b", normalized):
+            return True
+        if re.match(r"^alarm\b", normalized):
+            return True
+        if re.match(r"^set\s+(?:an?\s+)?(?:alarm|reminder)\b", normalized):
+            return True
+        if re.match(r"^(open|launch|start)\s+\S", normalized):
+            return True
+        if re.match(
+            r"^focus\s+(?:start|begin|stop|end|pause|resume|skip|next)\b",
+            normalized,
+        ):
+            return True
+        return False
 
     def set_launcher(self, launcher) -> None:
         """Inject the WindowsAppLauncher after construction."""
@@ -267,6 +435,7 @@ class CommandRouter:
         except ValueError as exc:
             return f"⚠ {exc}"
         if response is not None:
+            self._last_response_is_predefined = True
             return response
 
         if self._ai_fallback:

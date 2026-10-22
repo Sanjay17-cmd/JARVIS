@@ -12,6 +12,7 @@ from jarvis.ai.adapters import (
     GeminiAdapter,
     GenerationResult,
     GrokAdapter,
+    GroqAdapter,
     OpenAIAdapter,
     OpenRouterAdapter,
     ProviderError,
@@ -29,11 +30,12 @@ class Settings:
             "ai_primary_provider": "gemini",
             "ai_primary_model": "gemini-test",
             "ai_primary_credential_id": "",
+            "ai_chat_free_only": False,
             "ai_credentials": [],
             "ai_fallback_enabled": False,
             "ai_fallback_routes": [],
             "ai_provider_enabled": {
-                "gemini": True, "openrouter": True, "grok": True,
+                "gemini": True, "openrouter": True, "grok": True, "groq": True,
             },
             "ai_cache_enabled": False,
             "ai_max_retries": 0,
@@ -111,9 +113,230 @@ def mocked_store(monkeypatch):
 def gateway_for(settings, adapter, credentials=None):
     return AIGateway(
         settings,
-        adapters={"gemini": adapter, "openrouter": adapter, "grok": adapter},
+        adapters={
+            "gemini": adapter, "openrouter": adapter, "grok": adapter,
+            "groq": adapter,
+        },
         credential_store=CredentialStoreStub(credentials or {}),
     )
+
+
+def test_gateway_resolves_openrouter_key_for_image_generation(monkeypatch):
+    settings = Settings(
+        ai_primary_provider="gemini",
+        ai_credentials=[{
+            "id": "openrouter-key",
+            "provider": "openrouter",
+            "enabled": True,
+        }],
+    )
+    gateway = gateway_for(
+        settings,
+        FakeAdapter(),
+        {"openrouter-key": "stored-openrouter-key"},
+    )
+
+    assert gateway.get_api_key("openrouter") == "stored-openrouter-key"
+
+    settings.set("ai_primary_provider", "openrouter")
+    settings.set("ai_primary_credential_id", "__environment__")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "environment-openrouter-key")
+    assert gateway.get_api_key("openrouter") == "environment-openrouter-key"
+
+
+def test_gateway_resolves_standard_groq_environment_key(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-environment-key")
+    gateway = gateway_for(
+        Settings(ai_primary_provider="groq"),
+        FakeAdapter(),
+    )
+
+    assert gateway.get_api_key("groq") == "groq-environment-key"
+
+
+def test_free_chat_uses_verified_openrouter_route_only(
+    monkeypatch, mocked_store
+):
+    from jarvis.ai import free_models
+
+    monkeypatch.setattr(
+        free_models,
+        "list_free_openrouter_models",
+        lambda modality, **_kwargs: (
+            [{"id": "verified/free-chat:free", "name": "Verified Free Chat", "free": True}]
+            if modality == "text" else []
+        ),
+    )
+    monkeypatch.setattr(store, "save_model_catalog", lambda *_args: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    gemini = FakeAdapter(GenerationResult("must not run"))
+    openrouter = FakeAdapter(GenerationResult("free response"))
+    grok = FakeAdapter(GenerationResult("must not run"))
+    groq = FakeAdapter(GenerationResult("must not run"))
+    settings = Settings(
+        ai_chat_free_only=True,
+        ai_primary_provider="gemini",
+        ai_primary_model="paid-gemini-model",
+        ai_fallback_enabled=True,
+        ai_fallback_routes=[
+            {"provider": "grok", "model": "paid-grok", "enabled": True},
+            {"provider": "groq", "model": "paid-groq", "enabled": True},
+        ],
+    )
+    gateway = AIGateway(
+        settings,
+        {
+            "gemini": gemini,
+            "openrouter": openrouter,
+            "grok": grok,
+            "groq": groq,
+        },
+    )
+    set_context(gateway)
+
+    assert gateway.generate("question") == "free response"
+    assert openrouter.models == ["verified/free-chat:free"]
+    assert openrouter.keys == ["openrouter-test-key"]
+    assert gemini.keys == grok.keys == groq.keys == []
+
+
+def test_free_chat_does_not_fallback_to_paid_provider_after_free_route_fails(
+    monkeypatch, mocked_store
+):
+    from jarvis.ai import free_models
+
+    monkeypatch.setattr(
+        free_models,
+        "list_free_openrouter_models",
+        lambda *_args, **_kwargs: [
+            {"id": "verified/free-chat:free", "name": "Verified Free Chat", "free": True}
+        ],
+    )
+    monkeypatch.setattr(store, "save_model_catalog", lambda *_args: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    openrouter = FakeAdapter(
+        ProviderError("openrouter", "rate_limit", "limit reached")
+    )
+    paid_gemini = FakeAdapter(GenerationResult("must not run"))
+    settings = Settings(
+        ai_chat_free_only=True,
+        ai_primary_provider="gemini",
+        ai_fallback_enabled=True,
+        ai_fallback_routes=[
+            {"provider": "gemini", "model": "paid-gemini-model", "enabled": True}
+        ],
+    )
+    gateway = AIGateway(
+        settings,
+        {
+            "gemini": paid_gemini,
+            "openrouter": openrouter,
+            "grok": FakeAdapter(),
+            "groq": FakeAdapter(),
+        },
+    )
+    set_context(gateway)
+
+    with pytest.raises(ProviderError, match="AI request failed"):
+        gateway.generate("question")
+    assert openrouter.models == ["verified/free-chat:free"]
+    assert paid_gemini.keys == []
+
+
+def test_free_chat_fails_closed_when_catalog_has_no_zero_cost_text_models(
+    monkeypatch, mocked_store
+):
+    from jarvis.ai import free_models
+
+    monkeypatch.setattr(
+        free_models, "list_free_openrouter_models", lambda *_args, **_kwargs: []
+    )
+    paid = FakeAdapter(GenerationResult("must not run"))
+    gateway = AIGateway(
+        Settings(ai_chat_free_only=True),
+        {
+            "gemini": paid,
+            "openrouter": paid,
+            "grok": paid,
+            "groq": paid,
+        },
+    )
+    set_context(gateway)
+
+    with pytest.raises(ProviderError, match="No verified zero-priced"):
+        gateway.generate("question")
+    assert paid.keys == []
+
+
+def test_groq_adapter_uses_groq_openai_compatible_endpoint(monkeypatch):
+    import jarvis.ai.adapters as adapters
+
+    calls = []
+    monkeypatch.setattr(
+        adapters,
+        "_openai_compatible_generation",
+        lambda adapter, url, model, messages, key, *_args, **_kwargs: (
+            calls.append((adapter.provider_id, url, model, key, messages))
+            or GenerationResult("Groq response")
+        ),
+    )
+    adapter = GroqAdapter()
+    result = adapter.generate(
+        "llama-model",
+        "system",
+        [{"role": "user", "content": "hello"}],
+        "groq-secret",
+        64,
+        10,
+        Event(),
+    )
+
+    assert result.text == "Groq response"
+    assert calls[0][:4] == (
+        "groq",
+        "https://api.groq.com/openai/v1/chat/completions",
+        "llama-model",
+        "groq-secret",
+    )
+
+
+def test_ai_pipeline_free_chat_mode_routes_only_to_openrouter(isolated_ai_store, qtbot):
+    from jarvis.ui.ai_pipeline_dialog import AIPipelineDialog
+
+    settings = Settings(
+        ai_primary_provider="gemini",
+        ai_primary_model="paid-gemini-model",
+        ai_chat_free_only=True,
+        ai_provider_enabled={
+            "gemini": True, "openrouter": True, "grok": True, "groq": True,
+        },
+    )
+    dialog = AIPipelineDialog(settings)
+    qtbot.addWidget(dialog)
+
+    assert dialog.provider.currentData() == "openrouter"
+    assert dialog.provider.isEnabled() is False
+    assert dialog.fallback_enabled.isEnabled() is False
+    assert all(not button.isEnabled() for button in dialog._fallback_buttons)
+    assert dialog.advanced_enabled.isEnabled() is False
+
+    dialog._save()
+
+    assert settings.get("ai_chat_free_only") is True
+    assert settings.get("ai_primary_provider") == "openrouter"
+    assert settings.get("ai_primary_model") == ""
+
+    dialog.free_chat_only.setChecked(False)
+    assert dialog.provider.isEnabled() is True
+    assert all(button.isEnabled() for button in dialog._fallback_buttons)
+    gemini_index = dialog.provider.findData("gemini")
+    assert gemini_index >= 0
+    dialog.provider.setCurrentIndex(gemini_index)
+    dialog._save()
+
+    assert settings.get("ai_chat_free_only") is False
+    assert settings.get("ai_primary_provider") == "gemini"
+    dialog.close()
 
 
 def set_context(gateway, fingerprint="context-1"):
@@ -274,6 +497,22 @@ def test_gateway_cache_hit_skips_provider_request(mocked_store, monkeypatch):
     assert gateway.last_status.startswith("Cache hit")
 
 
+def test_uncached_action_planning_never_replays_a_cached_tool_call(
+    mocked_store, monkeypatch
+):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    adapter = FakeAdapter(
+        GenerationResult('{"action":"first"}'),
+        GenerationResult('{"action":"second"}'),
+    )
+    gateway = gateway_for(Settings(ai_cache_enabled=True), adapter)
+    set_context(gateway)
+
+    assert gateway.generate("same planner request", use_cache=False) == '{"action":"first"}'
+    assert gateway.generate("same planner request", use_cache=False) == '{"action":"second"}'
+    assert len(adapter.keys) == 2
+
+
 def test_gateway_cache_key_changes_with_context(mocked_store, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     adapter = FakeAdapter(GenerationResult("first"), GenerationResult("second"))
@@ -288,6 +527,58 @@ def test_gateway_cache_key_changes_with_context(mocked_store, monkeypatch):
     context[0] = "summary-b"
     assert gateway.generate("Explain a stable concept") == "second"
     assert len(adapter.keys) == 2
+
+
+def test_identical_consecutive_prompt_hits_persistent_cache(
+    isolated_ai_store, monkeypatch
+):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    adapter = FakeAdapter(GenerationResult("cached answer"))
+    settings = Settings(
+        ai_cache_enabled=True,
+        ai_recent_message_count=8,
+        ai_summary_threshold=30,
+    )
+    gateway = gateway_for(settings, adapter)
+    conversation_id = database.active_conversation_id()
+    prompt = "Explain a stable concept"
+
+    database.save_conversation_message("user", prompt, 1.0, conversation_id)
+    assert gateway.generate(prompt) == "cached answer"
+    database.save_conversation_message(
+        "assistant", "cached answer", 2.0, conversation_id
+    )
+
+    database.save_conversation_message("user", prompt, 3.0, conversation_id)
+    assert gateway.generate(prompt) == "cached answer"
+
+    assert adapter.keys == ["fake-key"]
+    assert gateway.last_status.startswith("Cache hit")
+
+
+def test_identical_prompt_after_new_context_does_not_reuse_old_answer(
+    isolated_ai_store, monkeypatch
+):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    adapter = FakeAdapter(GenerationResult("first"), GenerationResult("contextual"))
+    settings = Settings(ai_cache_enabled=True, ai_recent_message_count=8)
+    gateway = gateway_for(settings, adapter)
+    conversation_id = database.active_conversation_id()
+    prompt = "Explain a stable concept"
+
+    database.save_conversation_message("user", prompt, 1.0, conversation_id)
+    assert gateway.generate(prompt) == "first"
+    database.save_conversation_message("assistant", "first", 2.0, conversation_id)
+    database.save_conversation_message(
+        "user", "Remember that I prefer short explanations.", 3.0, conversation_id
+    )
+    database.save_conversation_message(
+        "assistant", "I will keep answers short.", 4.0, conversation_id
+    )
+    database.save_conversation_message("user", prompt, 5.0, conversation_id)
+
+    assert gateway.generate(prompt) == "contextual"
+    assert adapter.keys == ["fake-key", "fake-key"]
 
 
 def test_model_catalog_is_cached_and_refreshable(monkeypatch):

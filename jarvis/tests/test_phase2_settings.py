@@ -15,6 +15,9 @@ from pathlib import Path
 from PySide6.QtWidgets import QLabel
 from jarvis.config.settings import Settings
 from jarvis.config.defaults import DEFAULTS
+from jarvis.config.behavior_config import BehaviorConfig
+from jarvis.core.command_router import CommandRouter
+from jarvis.ui.settings_dialog import SettingsDialog
 
 
 @pytest.fixture
@@ -56,19 +59,24 @@ def test_panels_always_on_top_true_persists(tmp_s):
 def test_settings_has_top_section_tabs_and_persists_chat_voice_options(
     tmp_s, qtbot
 ):
-    from jarvis.ui.settings_dialog import SettingsDialog
-
     settings, _ = tmp_s
     dialog = SettingsDialog(settings)
     qtbot.addWidget(dialog)
     assert [
         dialog._sections.tabText(index)
         for index in range(dialog._sections.count())
-    ] == ["General", "Notifications", "AI & Voice", "Focus & Tools"]
+    ] == [
+        "General", "Notifications", "AI & Voice",
+        "Built-in Responses", "Web Search", "Focus & Tools",
+    ]
     dialog._tts_enabled.setChecked(True)
     dialog._ai_keyword.setText("Friday")
     dialog._ai_aliases.setText("Susanth, Computer")
     dialog._notification_category_controls["notification_reminders"].setChecked(False)
+    dialog._search_provider.setCurrentIndex(
+        dialog._search_provider.findData("tavily")
+    )
+    dialog._search_cache_ttl.setValue(120)
 
     legend = next(
         widget for widget in dialog.findChildren(QLabel)
@@ -82,6 +90,67 @@ def test_settings_has_top_section_tabs_and_persists_chat_voice_options(
     assert settings.get("ai_trigger_keyword") == "Friday"
     assert settings.get("ai_trigger_aliases") == ["Susanth", "Computer"]
     assert settings.get("notification_reminders") is False
+    assert settings.get("search_provider") == "tavily"
+    assert settings.get("search_cache_ttl_minutes") == 120
+
+
+def test_builtin_response_settings_page_adds_and_applies_local_response(
+    tmp_path, monkeypatch, qtbot
+):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    settings = Settings()
+    behavior = BehaviorConfig(tmp_path / "JARVIS" / "config")
+    router = CommandRouter()
+    router.set_responses(behavior.load("responses")["responses"])
+    dialog = SettingsDialog(settings, behavior=behavior, router=router)
+    qtbot.addWidget(dialog)
+
+    dialog._response_key.setText("greeting")
+    dialog._response_text.setPlainText("Hey, good to hear from you!")
+    dialog._add_builtin_response()
+
+    assert "Hey, good to hear from you!" in router._responses["greeting"]
+    assert "Hey, good to hear from you!" in behavior.load("responses")[
+        "responses"
+    ]["greeting"]
+    assert any(
+        item.text() == "greeting: Hey, good to hear from you!"
+        for item in (dialog._response_list.item(i)
+                     for i in range(dialog._response_list.count()))
+    )
+    dialog.close()
+
+
+def test_builtin_response_settings_page_imports_csv(
+    tmp_path, monkeypatch, qtbot
+):
+    from PySide6.QtWidgets import QFileDialog
+
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    csv_path = tmp_path / "responses.csv"
+    csv_path.write_text(
+        'key,response\n'
+        'greeting,"Hello, friend!"\n'
+        'how_are_you,"Doing great!"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *_args, **_kwargs: (str(csv_path), "CSV files (*.csv)")),
+    )
+    settings = Settings()
+    behavior = BehaviorConfig(tmp_path / "JARVIS" / "config")
+    router = CommandRouter()
+    router.set_responses(behavior.load("responses")["responses"])
+    dialog = SettingsDialog(settings, behavior=behavior, router=router)
+    qtbot.addWidget(dialog)
+
+    dialog._import_builtin_responses_csv()
+
+    assert "Hello, friend!" in router._responses["greeting"]
+    assert "Doing great!" in router._responses["how_are_you"]
+    dialog.close()
 
 
 # ── Phase 2 defaults present ─────────────────────────────────────────────────

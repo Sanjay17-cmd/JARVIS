@@ -1,7 +1,18 @@
 {
   "version": 1,
   "responses": {
-    "greeting": ["Hello! How can I help?", "Hi there. What can I do for you?"],
+    "greeting": [
+      "Hello! How can I help?",
+      "Hi there. What can I do for you?",
+      "Hey! Good to hear from you.",
+      "Hi! What would you like to do?",
+      "Hello! I'm ready when you are."
+    ],
+    "how_are_you": [
+      "I'm doing well and ready to help. How are you?",
+      "All systems are running smoothly. What can I help you with?",
+      "I'm great, thanks for asking! What shall we do?"
+    ],
     "goodbye": ["Goodbye! I'll be here when you need me.", "See you soon."],
     "listening": ["Listening."],
     "thinking": ["Let me think."],

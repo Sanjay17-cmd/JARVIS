@@ -6,12 +6,20 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QMessageBox, QProgressBar, QPushButton, QVBoxLayout,
+    QMessageBox, QProgressBar, QPushButton, QSpinBox, QVBoxLayout,
 )
 
 from jarvis.voice import VoiceController
 
-_MODELS = ("tiny.en", "base.en", "small.en")
+_MODELS = ("tiny.en", "base.en", "small.en", "tiny", "base", "small")
+
+_LANGUAGES = (
+    ("English", "en-US"),
+    ("Tamil", "ta"),
+    ("Telugu", "te"),
+    ("Kannada", "kn"),
+    ("Malayalam", "ml"),
+)
 
 
 class VoiceSetupDialog(QDialog):
@@ -37,6 +45,50 @@ class VoiceSetupDialog(QDialog):
         self._enabled.setChecked(bool(settings.get("voice_enabled", False)))
         self._enabled.toggled.connect(self._save_settings)
         layout.addWidget(self._enabled)
+        self._auto_listen = QCheckBox(
+            "Keep listening after each reply (hands-free conversation)"
+        )
+        self._auto_listen.setChecked(
+            bool(settings.get("voice_auto_listen", True))
+        )
+        self._auto_listen.toggled.connect(self._save_voice_behavior)
+        layout.addWidget(self._auto_listen)
+        silence_row = QHBoxLayout()
+        silence_row.addWidget(QLabel("Stop after silence:"))
+        self._silence_ms = QSpinBox()
+        self._silence_ms.setRange(300, 5000)
+        self._silence_ms.setSingleStep(100)
+        self._silence_ms.setSuffix(" ms")
+        self._silence_ms.setValue(int(settings.get("voice_silence_ms", 900)))
+        self._silence_ms.valueChanged.connect(self._save_voice_behavior)
+        silence_row.addWidget(self._silence_ms)
+        silence_row.addStretch()
+        layout.addLayout(silence_row)
+        self._interrupt_tts = QCheckBox(
+            "Interrupt JARVIS speech when I start talking"
+        )
+        self._interrupt_tts.setChecked(
+            bool(settings.get("voice_interrupt_tts", True))
+        )
+        self._interrupt_tts.toggled.connect(self._save_voice_behavior)
+        layout.addWidget(self._interrupt_tts)
+
+        layout.addWidget(QLabel("Speech recognition language:"))
+        self._language = QComboBox()
+        for label, language in _LANGUAGES:
+            self._language.addItem(label, language)
+        language_index = self._language.findData(
+            str(settings.get("voice_language", "en-US"))
+        )
+        if language_index >= 0:
+            self._language.setCurrentIndex(language_index)
+        self._language.currentIndexChanged.connect(self._save_language)
+        layout.addWidget(self._language)
+        layout.addWidget(QLabel(
+            "Tamil, Telugu, Kannada, and Malayalam use multilingual Whisper "
+            "models (tiny, base, or small), not English-only .en models. "
+            "Spoken replies depend on matching Windows voices being installed."
+        ))
 
         self._tts_enabled = QCheckBox("Speak every assistant response")
         self._tts_enabled.setChecked(bool(settings.get("tts_enabled", False)))
@@ -136,6 +188,28 @@ class VoiceSetupDialog(QDialog):
     def _save_settings(self, *_args) -> None:
         self._settings.set("voice_enabled", self._enabled.isChecked())
         self._settings.set("voice_microphone_id", int(self._microphone.currentData()))
+        self._settings.save()
+
+    def _save_voice_behavior(self, *_args) -> None:
+        self._settings.set("voice_auto_listen", self._auto_listen.isChecked())
+        self._settings.set("voice_silence_ms", self._silence_ms.value())
+        self._settings.set("voice_interrupt_tts", self._interrupt_tts.isChecked())
+        self._settings.save()
+
+    def _save_language(self, *_args) -> None:
+        language = str(self._language.currentData() or "en-US")
+        self._settings.set("voice_language", language)
+        model_path = str(self._settings.get("voice_model_path", "")).strip()
+        model = model_path or str(
+            self._settings.get("voice_model_id", "base.en")
+        ).strip()
+        if not model_path and language != "en-US" and model.endswith(".en"):
+            model = model[:-3]
+            self._settings.set("voice_model_id", model)
+            self._settings.set("voice_model_path", "")
+            self._settings.set("voice_model_ready", False)
+            self._model.setCurrentText(model)
+            self._update_model_label()
         self._settings.save()
 
     def _save_tts_settings(self, *_args) -> None:

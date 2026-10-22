@@ -1,4 +1,4 @@
-"""Optional local push-to-talk speech recognition and text-to-speech."""
+"""Optional local segmented speech recognition and text-to-speech."""
 from __future__ import annotations
 
 import logging
@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 log = logging.getLogger(__name__)
 
@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 class _CaptureWorker(QObject):
     recognized = Signal(str)
     failed = Signal(str)
+    speech_started = Signal()
 
     def __init__(
         self,
@@ -23,6 +24,7 @@ class _CaptureWorker(QObject):
         device_index: int,
         device: str,
         compute_type: str,
+        silence_ms: int,
     ) -> None:
         super().__init__()
         self._stop_event = stop_event
@@ -31,6 +33,7 @@ class _CaptureWorker(QObject):
         self._device_index = None if device_index < 0 else device_index
         self._device = device
         self._compute_type = compute_type
+        self._silence_ms = silence_ms
 
     @Slot()
     def run(self) -> None:
@@ -40,6 +43,8 @@ class _CaptureWorker(QObject):
             from faster_whisper import WhisperModel
 
             audio_chunks = []
+            speech_detected = False
+            silent_ms = 0
             stop_at = time.monotonic() + 120
             with sd.InputStream(
                 samplerate=16000,
@@ -49,10 +54,25 @@ class _CaptureWorker(QObject):
             ) as stream:
                 while not self._stop_event.is_set() and time.monotonic() < stop_at:
                     audio, _ = stream.read(1600)
-                    audio_chunks.append(audio[:, 0].copy())
+                    samples = audio[:, 0].copy()
+                    audio_chunks.append(samples)
+                    rms = float(np.sqrt(np.mean(np.square(samples))))
+                    if rms >= 0.012:
+                        silent_ms = 0
+                        if not speech_detected:
+                            speech_detected = True
+                            self.speech_started.emit()
+                    elif speech_detected:
+                        silent_ms += 100
+                        if silent_ms >= self._silence_ms:
+                            break
 
             if not audio_chunks:
                 self.failed.emit("No audio was captured.")
+                return
+            if not speech_detected:
+                if self._stop_event.is_set():
+                    self.failed.emit("No speech was detected.")
                 return
 
             model = WhisperModel(
@@ -115,16 +135,22 @@ class VoiceController(QObject):
     setup_progress = Signal(str)
     model_initialized = Signal(str)
     setup_failed = Signal(str)
+    speech_finished = Signal()
 
     def __init__(self, settings, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._tts_lock = threading.Lock()
+        self._tts_state_lock = threading.Lock()
+        self._tts_engine = None
+        self._tts_generation = 0
         self._thread: QThread | None = None
         self._worker: _CaptureWorker | None = None
         self._setup_thread: QThread | None = None
         self._setup_worker: _ModelSetupWorker | None = None
         self._stop_event: threading.Event | None = None
+        self._listening_session = False
+        self._segment_recognized = False
         self._model_ready = bool(settings.get("voice_model_ready", False))
 
     @property
@@ -160,6 +186,8 @@ class VoiceController(QObject):
             log.info("Voice unavailable: %s", exc)
             return
 
+        self._listening_session = True
+        self._segment_recognized = False
         self._stop_event = threading.Event()
         self._thread = QThread(self)
         self._worker = _CaptureWorker(
@@ -169,11 +197,15 @@ class VoiceController(QObject):
             int(self._settings.get("voice_microphone_id", -1)),
             str(self._settings.get("voice_device", "cpu")),
             str(self._settings.get("voice_compute_type", "int8")),
+            max(300, min(
+                int(self._settings.get("voice_silence_ms", 900)), 5000
+            )),
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._worker.recognized.connect(self.transcription_ready)
+        self._worker.recognized.connect(self._on_transcription)
         self._worker.failed.connect(self.error)
+        self._worker.speech_started.connect(self._on_speech_started)
         self._worker.recognized.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
         self._worker.recognized.connect(self._worker.deleteLater)
@@ -276,6 +308,7 @@ class VoiceController(QObject):
             return f"Microphone unavailable: {exc}"
 
     def stop_listening(self) -> None:
+        self._listening_session = False
         if self._stop_event is not None:
             self._stop_event.set()
 
@@ -290,18 +323,53 @@ class VoiceController(QObject):
         self._stop_event = None
         if thread is not None:
             thread.deleteLater()
+        auto_listen = bool(self._settings.get("voice_auto_listen", True))
+        should_retry = (
+            self._listening_session and auto_listen and not self._segment_recognized
+        )
+        if self._listening_session and not auto_listen:
+            self._listening_session = False
         self.listening_changed.emit(False)
+        if should_retry:
+            QTimer.singleShot(250, self.start_listening)
+
+    @Slot(str)
+    def _on_transcription(self, text: str) -> None:
+        self._segment_recognized = True
+        self.transcription_ready.emit(text)
 
     def speak(self, text: str) -> None:
         """Speak asynchronously when enabled; speech dependencies remain optional."""
         if not self._settings.get("tts_enabled", False) or not text.strip():
             return
+        with self._tts_state_lock:
+            self._tts_generation += 1
+            generation = self._tts_generation
         threading.Thread(
             target=self._speak_blocking,
-            args=(text,),
+            args=(text, generation),
             name="jarvis-tts",
             daemon=True,
         ).start()
+
+    @Slot()
+    def _on_speech_started(self) -> None:
+        if self._settings.get("voice_interrupt_tts", True):
+            self.stop_speaking()
+
+    def stop_speaking(self) -> None:
+        with self._tts_state_lock:
+            self._tts_generation += 1
+            engine = self._tts_engine
+        if engine is not None:
+            try:
+                engine.stop()
+            except Exception as exc:
+                log.warning("Could not interrupt speech output: %s", exc)
+
+    @property
+    def listening_session_active(self) -> bool:
+        return self._listening_session
 
     def test_speech(self) -> None:
         threading.Thread(
@@ -325,12 +393,21 @@ class VoiceController(QObject):
         finally:
             engine.stop()
 
-    def _speak_blocking(self, text: str) -> None:
+    def _speak_blocking(self, text: str, generation: int | None = None) -> None:
         with self._tts_lock:
+            engine = None
             try:
                 import pyttsx3
 
+                with self._tts_state_lock:
+                    if generation is not None and generation != self._tts_generation:
+                        return
                 engine = pyttsx3.init()
+                with self._tts_state_lock:
+                    if generation is not None and generation != self._tts_generation:
+                        engine.stop()
+                        return
+                    self._tts_engine = engine
                 engine.setProperty("rate", int(self._settings.get("tts_rate", 175)))
                 engine.setProperty("volume", float(self._settings.get("tts_volume", 0.9)))
                 voice_id = str(self._settings.get("tts_voice", ""))
@@ -341,3 +418,15 @@ class VoiceController(QObject):
             except Exception as exc:
                 log.exception("Text-to-speech failed")
                 self.error.emit(f"Text-to-speech failed: {exc}")
+            finally:
+                with self._tts_state_lock:
+                    current_generation = self._tts_generation
+                    if self._tts_engine is engine:
+                        self._tts_engine = None
+                if engine is not None:
+                    try:
+                        engine.stop()
+                    except Exception:
+                        log.debug("Speech engine already stopped", exc_info=True)
+                if generation is None or generation == current_generation:
+                    self.speech_finished.emit()

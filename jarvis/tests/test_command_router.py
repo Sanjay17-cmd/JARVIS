@@ -90,6 +90,67 @@ def test_route_stream_forwards_ai_chunks(router):
     assert chunks == ["AI ", "reply"]
 
 
+def test_voice_request_uses_shared_action_fallback(router):
+    calls = []
+    router.register_voice_fallback(
+        lambda prompt, _chunk, _cancel, _reset: calls.append(prompt) or "voice action"
+    )
+    router.register_ai_fallback(
+        lambda _text: "regular",
+        cancelable_stream_handler=lambda _text, _chunk, _cancel, _reset: "regular stream",
+    )
+
+    assert router.route_stream(
+        "Create a task", lambda _chunk: None, voice_request=True
+    ) == "voice action"
+    assert calls == ["Create a task"]
+
+
+def test_disabled_voice_actions_skip_local_side_effects(router):
+    invoked = []
+    router._commands["danger"] = lambda _text: invoked.append(True) or "done"
+    router.register_voice_fallback(
+        lambda _text, _chunk, _cancel, _reset: "I can answer but won't act",
+        actions_allowed=lambda: False,
+    )
+
+    assert router.route_stream(
+        "danger", lambda _chunk: None, voice_request=True
+    ) == "I can answer but won't act"
+    assert invoked == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["task finish report", "done 4", "remind me in 5 minutes to stretch",
+     "alarm in 10 minutes", "open notepad", "focus start"],
+)
+def test_mutating_chat_commands_go_through_confirmation_pipeline(router, command):
+    calls = []
+    router.register_ai_fallback(
+        lambda prompt: calls.append(prompt) or "confirmation pending",
+        cancelable_stream_handler=lambda prompt, _chunk, _cancel, _reset: (
+            calls.append(prompt) or "confirmation pending"
+        ),
+    )
+
+    response = router.route_stream(command, lambda _chunk: None)
+
+    assert response == "confirmation pending"
+    assert calls == [command]
+    assert not router.has_builtin(command)
+
+
+def test_mutating_chat_command_is_blocked_when_confirmation_service_is_missing(router):
+    invoked = []
+    router._commands["task"] = lambda _text: invoked.append(True) or "created"
+
+    response = router.route_stream("task a report", lambda _chunk: None)
+
+    assert "confirmation service is unavailable" in response
+    assert invoked == []
+
+
 def test_configured_ai_keyword_strips_prefix_and_forces_ai(router):
     calls = []
     router.register_ai_fallback(lambda text: calls.append(text) or "AI result")
@@ -166,7 +227,94 @@ def test_router_reports_when_a_builtin_response_uses_predefined_text(router):
     assert router.last_response_is_predefined is True
 
     router.route("status")
+    assert router.last_response_is_predefined is True
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "hi",
+        "hey",
+        "hi how are you",
+        "how are you today",
+        "good morning",
+        "good evening",
+    ],
+)
+def test_common_greetings_are_local_predefined_responses(router, phrase):
+    called = []
+    router.register_ai_fallback(lambda text: called.append(text) or "AI reply")
+
+    answer = router.route(phrase)
+
+    assert answer
+    assert router.has_builtin(phrase)
+    assert called == []
+    assert router.last_response_is_predefined is True
+
+
+def test_unknown_request_still_uses_ai_fallback_and_is_not_marked(router):
+    router.register_ai_fallback(lambda _text: "AI answer")
+
+    assert router.route("Explain a black hole") == "AI answer"
     assert router.last_response_is_predefined is False
+
+
+def test_current_information_routes_to_search_handler_before_ai(router):
+    calls = []
+    router.register_ai_fallback(lambda _text: "AI without search")
+    router.register_search_handler(lambda query: calls.append(query) or "Search result")
+
+    assert router.route_stream("latest Python release", lambda _chunk: None) == (
+        "Search result"
+    )
+    assert calls == ["latest Python release"]
+
+
+def test_forced_search_can_search_even_for_builtin_input(router):
+    router.register_search_handler(lambda query: f"searched: {query}")
+
+    assert router.route_stream(
+        "hello", lambda _chunk: None, force_search=True
+    ) == "searched: hello"
+
+
+def test_local_command_takes_precedence_over_automatic_search(router):
+    @router.register("meeting")
+    def _meeting(_text):
+        return "Local reminder created"
+
+    calls = []
+    router.register_search_handler(
+        lambda query: calls.append(query) or "Search result"
+    )
+
+    assert router.route_stream(
+        "meeting today", lambda _chunk: None
+    ) == "Local reminder created"
+    assert calls == []
+
+
+def test_alarm_command_requires_confirmation_pipeline(
+    router, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    from jarvis.scheduling import database
+
+    database.close()
+    monkeypatch.setattr(database, "_db_path", lambda: tmp_path / "jarvis.db")
+
+    calls = []
+    router.register_ai_fallback(
+        lambda prompt: calls.append(prompt) or "Please confirm: create alarm."
+    )
+    answer = router.route_stream("alarm at 11:59 PM", lambda _chunk: None)
+
+    assert answer.startswith("Please confirm:")
+    assert calls == ["alarm at 11:59 PM"]
+    assert router.last_response_is_predefined is False
+    assert not router.has_builtin("alarm at 11:59 PM")
+    assert database.execute("SELECT COUNT(*) FROM alarms").fetchone()[0] == 0
 
 
 def test_ambiguous_custom_trigger_returns_actionable_error(router):

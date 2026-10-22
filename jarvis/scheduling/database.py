@@ -92,7 +92,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         conversation_id TEXT NOT NULL DEFAULT 'legacy',
         role        TEXT    NOT NULL CHECK (role IN ('user', 'assistant')),
         content     TEXT    NOT NULL,
-        created_at  REAL    NOT NULL
+        created_at  REAL    NOT NULL,
+        model_label TEXT    NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS conversations (
         id          TEXT PRIMARY KEY,
@@ -112,6 +113,11 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE conversation_messages ADD COLUMN "
             "conversation_id TEXT NOT NULL DEFAULT 'legacy'"
+        )
+    if "model_label" not in columns:
+        conn.execute(
+            "ALTER TABLE conversation_messages ADD COLUMN "
+            "model_label TEXT NOT NULL DEFAULT ''"
         )
     for table in ("reminders", "alarms"):
         table_columns = {
@@ -289,6 +295,7 @@ def save_conversation_message(
     content: str,
     created_at: float,
     conversation_id: str | None = None,
+    model_label: str = "",
 ) -> None:
     if role not in {"user", "assistant"}:
         raise ValueError(f"Unsupported conversation role: {role}")
@@ -303,8 +310,9 @@ def save_conversation_message(
             raise ValueError(f"Conversation '{conversation_id}' does not exist.")
         conn.execute(
             "INSERT INTO conversation_messages "
-            "(conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (conversation_id, role, content, created_at),
+            "(conversation_id, role, content, created_at, model_label) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (conversation_id, role, content, created_at, model_label),
         )
         conversation = conn.execute(
             "SELECT title FROM conversations WHERE id=?", (conversation_id,)
@@ -332,19 +340,33 @@ def load_conversation_history(
     conversation_id = conversation_id or active_conversation_id()
     with _lock:
         rows = get_conn().execute(
-            "SELECT role, content, created_at FROM "
-            "(SELECT id, role, content, created_at FROM conversation_messages "
+            "SELECT role, content, created_at, model_label FROM "
+            "(SELECT id, role, content, created_at, model_label FROM conversation_messages "
             "WHERE conversation_id=? ORDER BY id DESC LIMIT ?) ORDER BY id",
             (conversation_id, limit),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [
+        {
+            key: value
+            for key, value in dict(row).items()
+            if key != "model_label" or value
+        }
+        for row in rows
+    ]
 
 
 def conversation_messages(conversation_id: str) -> list[dict]:
     with _lock:
         rows = get_conn().execute(
-            "SELECT id,role,content,created_at FROM conversation_messages "
+            "SELECT id,role,content,created_at,model_label FROM conversation_messages "
             "WHERE conversation_id=? ORDER BY id",
             (conversation_id,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [
+        {
+            key: value
+            for key, value in dict(row).items()
+            if key != "model_label" or value
+        }
+        for row in rows
+    ]

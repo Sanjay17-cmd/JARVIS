@@ -1,11 +1,13 @@
 """
 ui/settings_dialog.py — Slim settings dialog for JARVIS v2.
 
-Only the 8 most-used settings are shown here.
-All advanced settings live in advanced_settings.ini (opened via a button).
+Frequently used settings are grouped into sections here.
+Advanced settings remain in advanced_settings.ini.
 """
 from __future__ import annotations
+import csv
 import logging, os
+from pathlib import Path
 from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt, Signal, QPoint, QTimer
 from PySide6.QtGui import QMouseEvent, QPainter, QColor
@@ -13,7 +15,8 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget,
     QLabel, QSlider, QCheckBox, QSpinBox, QLineEdit,
     QPushButton, QFormLayout, QFrame, QScrollArea, QComboBox,
-    QTabWidget,
+    QTabWidget, QFileDialog, QListWidget, QPlainTextEdit, QInputDialog,
+    QMessageBox,
 )
 if TYPE_CHECKING:
     from jarvis.config.settings import Settings
@@ -62,6 +65,7 @@ class SettingsDialog(QDialog):
                  voice_controller=None,
                  overlay=None,
                  ai_gateway=None,
+                 search_service=None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._s = settings
@@ -70,6 +74,7 @@ class SettingsDialog(QDialog):
         self._voice = voice_controller
         self._overlay = overlay
         self._ai_gateway = ai_gateway
+        self._search_service = search_service
         self._drag_offset: QPoint | None = None
         self._dragging = False
         self.setWindowFlags(
@@ -79,7 +84,7 @@ class SettingsDialog(QDialog):
         self.apply_topmost(panels_always_on_top)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet(_STYLE)
-        self.setFixedWidth(440)
+        self.setFixedWidth(600)
         self._build()
         from jarvis.ui.dialog_window import configure_dialog_window
         configure_dialog_window(self, self._s)
@@ -133,7 +138,10 @@ class SettingsDialog(QDialog):
 
         self._sections = QTabWidget()
         self._section_forms = {}
-        for title in ("General", "Notifications", "AI & Voice", "Focus & Tools"):
+        for title in (
+            "General", "Notifications", "AI & Voice",
+            "Built-in Responses", "Web Search", "Focus & Tools",
+        ):
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_form = QFormLayout()
@@ -247,6 +255,13 @@ class SettingsDialog(QDialog):
         self._tts_enabled = QCheckBox("Speak all assistant responses")
         self._tts_enabled.setChecked(self._s.get("tts_enabled", False))
         form.addRow("", self._tts_enabled)
+        self._voice_actions = QCheckBox(
+            "Allow spoken commands to perform application actions"
+        )
+        self._voice_actions.setChecked(
+            self._s.get("voice_actions_enabled", True)
+        )
+        form.addRow("", self._voice_actions)
         voice_setup = QPushButton("Voice input and voice selection…")
         voice_setup.clicked.connect(self._open_voice)
         form.addRow("Voice:", voice_setup)
@@ -255,6 +270,37 @@ class SettingsDialog(QDialog):
         )
         ai_note.setStyleSheet("QLabel{color:rgba(180,180,255,160);font-size:10px;}")
         form.addRow("", ai_note)
+
+        form = self._section_forms["Built-in Responses"]
+        form.addRow(
+            "",
+            QLabel(
+                "Add short local replies here. Unmatched requests still go to "
+                "the configured AI provider."
+            ),
+        )
+        self._response_key = QLineEdit()
+        self._response_key.setPlaceholderText("Response key, e.g. greeting")
+        form.addRow("Key:", self._response_key)
+        self._response_text = QPlainTextEdit()
+        self._response_text.setPlaceholderText("One predefined reply")
+        self._response_text.setMaximumHeight(72)
+        form.addRow("Reply:", self._response_text)
+        response_buttons = QHBoxLayout()
+        add_response = QPushButton("Add reply")
+        add_response.clicked.connect(self._add_builtin_response)
+        response_buttons.addWidget(add_response)
+        import_responses = QPushButton("Import CSV…")
+        import_responses.clicked.connect(self._import_builtin_responses_csv)
+        response_buttons.addWidget(import_responses)
+        form.addRow("", response_buttons)
+        self._response_list = QListWidget()
+        self._response_list.setMaximumHeight(130)
+        form.addRow("Saved replies:", self._response_list)
+        self._response_status = QLabel()
+        self._response_status.setWordWrap(True)
+        form.addRow("", self._response_status)
+        self._refresh_builtin_response_list()
 
         form = self._section_forms["Focus & Tools"]
         self._focus_duration = QSpinBox()
@@ -274,6 +320,72 @@ class SettingsDialog(QDialog):
             self._s.get("focus_nudge_cooldown_minutes", 10)
         )
         form.addRow("Nudge cooldown:", self._focus_cooldown)
+
+        form = self._section_forms["Web Search"]
+        self._search_provider = QComboBox()
+        for label, provider in (
+            ("Brave Search", "brave"),
+            ("Tavily", "tavily"),
+            ("OpenRouter Web Search", "openrouter"),
+        ):
+            self._search_provider.addItem(label, provider)
+        provider_index = self._search_provider.findData(
+            self._s.get("search_provider", "brave")
+        )
+        if provider_index >= 0:
+            self._search_provider.setCurrentIndex(provider_index)
+        form.addRow("Search provider:", self._search_provider)
+        self._search_openrouter_model = QLineEdit(
+            str(self._s.get("search_openrouter_model", ""))
+        )
+        self._search_openrouter_model.setPlaceholderText(
+            "OpenRouter model ID (only for OpenRouter Web Search)"
+        )
+        form.addRow("OpenRouter model:", self._search_openrouter_model)
+        key_row = QHBoxLayout()
+        self._search_key_status = QLabel()
+        self._search_key_status.setWordWrap(True)
+        save_search_key = QPushButton("Set / replace secure key…")
+        save_search_key.clicked.connect(self._save_search_key)
+        key_row.addWidget(self._search_key_status, 1)
+        key_row.addWidget(save_search_key)
+        form.addRow("API key:", key_row)
+        self._search_limit = QSpinBox()
+        self._search_limit.setRange(1, 5)
+        self._search_limit.setSuffix(" results")
+        self._search_limit.setValue(int(self._s.get("search_result_limit", 5)))
+        form.addRow("Result limit:", self._search_limit)
+        self._search_timeout = QSpinBox()
+        self._search_timeout.setRange(2, 30)
+        self._search_timeout.setSuffix(" sec")
+        self._search_timeout.setValue(
+            int(self._s.get("search_timeout_seconds", 12))
+        )
+        form.addRow("Search timeout:", self._search_timeout)
+        self._search_cache_ttl = QSpinBox()
+        self._search_cache_ttl.setRange(1, 43200)
+        self._search_cache_ttl.setSuffix(" min")
+        self._search_cache_ttl.setValue(
+            int(self._s.get("search_cache_ttl_minutes", 240))
+        )
+        form.addRow("Stable-result cache:", self._search_cache_ttl)
+        self._search_news_ttl = QSpinBox()
+        self._search_news_ttl.setRange(1, 1440)
+        self._search_news_ttl.setSuffix(" min")
+        self._search_news_ttl.setValue(
+            int(self._s.get("search_news_cache_ttl_minutes", 15))
+        )
+        form.addRow("News-result cache:", self._search_news_ttl)
+        test_search = QPushButton("Test Search Connection")
+        test_search.clicked.connect(self._test_search)
+        form.addRow("", test_search)
+        self._search_stats = QLabel()
+        self._search_stats.setWordWrap(True)
+        form.addRow("Usage:", self._search_stats)
+        self._search_provider.currentIndexChanged.connect(
+            self._refresh_search_provider_status
+        )
+        self._refresh_search_provider_status()
         bl.addWidget(self._sections)
 
         # Divider
@@ -296,6 +408,7 @@ class SettingsDialog(QDialog):
         tool_actions = (
             ("Behavior & Responses", self._open_behavior),
             ("Focus App Rules", self._open_focus_rules),
+            ("AI Action History", self._open_ai_action_history),
             ("Robot Appearance", self._open_animations),
             ("Tasks", self._open_tasks),
             ("Reminders & Alarms", self._open_reminders),
@@ -365,6 +478,87 @@ class SettingsDialog(QDialog):
         from jarvis.ui.behavior_config_dialog import BehaviorConfigDialog
         BehaviorConfigDialog(self._behavior, self._router, self).exec()
 
+    def _refresh_builtin_response_list(self) -> None:
+        self._response_list.clear()
+        if self._behavior is None:
+            self._response_status.setText("Response configuration is unavailable.")
+            return
+        try:
+            responses = self._behavior.load("responses").get("responses", {})
+            for key, alternatives in responses.items():
+                for response in alternatives:
+                    self._response_list.addItem(f"{key}: {response}")
+            self._response_status.setText(
+                f"{sum(len(items) for items in responses.values())} replies loaded."
+            )
+        except Exception as exc:
+            self._response_status.setText(f"Could not load responses: {exc}")
+
+    def _append_builtin_responses(self, rows: list[tuple[str, str]]) -> None:
+        if self._behavior is None or self._router is None:
+            self._response_status.setText("Response configuration is unavailable.")
+            return
+        try:
+            data = self._behavior.load("responses")
+            responses = data["responses"]
+            for key, response in rows:
+                if not key.strip() or not response.strip():
+                    raise ValueError("Response keys and replies cannot be blank.")
+                responses.setdefault(key.strip(), []).append(response.strip())
+            self._behavior.save("responses", data)
+            self._router.set_responses(responses)
+            self._refresh_builtin_response_list()
+            self._response_status.setText(
+                f"Added {len(rows)} predefined response(s)."
+            )
+            self._response_status.setStyleSheet("color:#80ffab")
+        except Exception as exc:
+            self._response_status.setText(f"Could not add responses: {exc}")
+            self._response_status.setStyleSheet("color:#ff7777")
+
+    def _add_builtin_response(self) -> None:
+        self._append_builtin_responses([(
+            self._response_key.text(),
+            self._response_text.toPlainText(),
+        )])
+        if self._response_status.text().startswith("Added "):
+            self._response_key.clear()
+            self._response_text.clear()
+
+    def _import_builtin_responses_csv(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import built-in responses",
+            "",
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not filename:
+            return
+        try:
+            rows: list[tuple[str, str]] = []
+            with Path(filename).open(
+                "r", encoding="utf-8-sig", newline=""
+            ) as handle:
+                reader = csv.reader(handle)
+                for line_number, row in enumerate(reader, start=1):
+                    if line_number == 1 and [
+                        cell.strip().casefold() for cell in row
+                    ] == ["key", "response"]:
+                        continue
+                    if not row or all(not cell.strip() for cell in row):
+                        continue
+                    if len(row) != 2:
+                        raise ValueError(
+                            f"CSV row {line_number} must have exactly two columns: key,response."
+                        )
+                    rows.append((row[0], row[1]))
+            if not rows:
+                raise ValueError("The CSV contains no response rows.")
+            self._append_builtin_responses(rows)
+        except (OSError, UnicodeError, csv.Error, ValueError) as exc:
+            self._response_status.setText(f"CSV import failed: {exc}")
+            self._response_status.setStyleSheet("color:#ff7777")
+
     def _open_voice(self) -> None:
         if self._voice is None:
             return
@@ -372,9 +566,107 @@ class SettingsDialog(QDialog):
         VoiceSetupDialog(self._s, self._voice, self).exec()
         self._tts_enabled.setChecked(self._s.get("tts_enabled", False))
 
+    def _save_search_key(self) -> None:
+        provider = str(self._search_provider.currentData())
+        secret, accepted = QInputDialog.getText(
+            self,
+            f"Secure {provider} search key",
+            "API key (stored in Windows Credential Manager):",
+            QLineEdit.EchoMode.Password,
+        )
+        if not accepted or not secret.strip():
+            return
+        try:
+            from jarvis.config.credential_store import CredentialStore
+
+            CredentialStore().set(f"web-search:{provider}", secret)
+            self._refresh_search_provider_status()
+        except Exception as exc:
+            self._search_key_status.setText(f"Secure storage failed: {exc}")
+
+    def _refresh_search_provider_status(self, *_args) -> None:
+        provider = str(self._search_provider.currentData())
+        try:
+            from jarvis.config.credential_store import CredentialStore
+
+            configured = bool(
+                CredentialStore().get(f"web-search:{provider}")
+            )
+            self._search_key_status.setText(
+                "Secure key configured" if configured else "No secure key configured"
+            )
+        except Exception as exc:
+            self._search_key_status.setText(f"Credential store unavailable: {exc}")
+        try:
+            if self._search_service is not None:
+                from jarvis.ai.web_search import search_statistics
+
+                stats = search_statistics(provider)
+                self._search_stats.setText(
+                    f"{provider}: {stats['requests']} requests, "
+                    f"{stats['cache_hits']} cache hits, {stats['failures']} failures"
+                )
+            else:
+                self._search_stats.setText("Usage statistics are unavailable.")
+        except Exception as exc:
+            self._search_stats.setText(f"Could not load search usage: {exc}")
+
+    def _test_search(self) -> None:
+        provider = str(self._search_provider.currentData())
+        if self._search_service is None:
+            self._search_key_status.setText("Search service is unavailable.")
+            return
+        try:
+            from jarvis.config.credential_store import CredentialStore
+
+            key = CredentialStore().get(f"web-search:{provider}") or ""
+            model = (
+                str(self._search_openrouter_model.text()).strip()
+                if provider == "openrouter"
+                else ""
+            )
+            if provider == "openrouter" and not model:
+                model = str(self._s.get("ai_primary_model", ""))
+            result = self._search_service.search(
+                "JARVIS web search connection test",
+                provider,
+                key,
+                model=model,
+                timeout=self._search_timeout.value(),
+                max_results=1,
+            )
+            self._search_key_status.setText(
+                f"Connected to {provider}; received {len(result.results)} source(s)."
+            )
+        except Exception as exc:
+            self._search_key_status.setText(f"Search test failed: {exc}")
+        self._refresh_search_provider_status()
+
     def _open_focus_rules(self) -> None:
         from jarvis.ui.focus_rules_dialog import FocusRulesDialog
         FocusRulesDialog(self._s, self).exec()
+
+    def _open_ai_action_history(self) -> None:
+        from datetime import datetime
+        from jarvis.ai.tools import get_action_history
+
+        try:
+            entries = get_action_history(50)
+        except Exception as exc:
+            QMessageBox.warning(self, "AI Action History", f"Could not load history: {exc}")
+            return
+        if not entries:
+            text = "No AI application actions have been recorded."
+        else:
+            text = "\n".join(
+                f"{datetime.fromtimestamp(entry['created_at']).strftime('%Y-%m-%d %H:%M:%S')}  "
+                f"{entry['tool_name']} — {entry['outcome']}"
+                + (f" item #{entry['affected_item_id']}" if entry["affected_item_id"] else "")
+                + (f" ({entry['result_summary']})" if entry["result_summary"] else "")
+                + (f" ({entry['error_code']})" if entry["error_code"] else "")
+                for entry in entries
+            )
+        QMessageBox.information(self, "AI Action History", text)
 
     def _open_animations(self) -> None:
         if self._overlay is None:
@@ -413,6 +705,16 @@ class SettingsDialog(QDialog):
             s.set(key, checkbox.isChecked())
         s.set("sound_enabled", self._alarm_sound.isChecked())
         s.set("tts_enabled", self._tts_enabled.isChecked())
+        s.set("voice_actions_enabled", self._voice_actions.isChecked())
+        s.set("search_provider", str(self._search_provider.currentData()))
+        s.set(
+            "search_openrouter_model",
+            self._search_openrouter_model.text().strip(),
+        )
+        s.set("search_result_limit", self._search_limit.value())
+        s.set("search_timeout_seconds", self._search_timeout.value())
+        s.set("search_cache_ttl_minutes", self._search_cache_ttl.value())
+        s.set("search_news_cache_ttl_minutes", self._search_news_ttl.value())
         s.set("wellness_enabled",     self._wl.isChecked())
         for enabled, interval, setting_key, interval_key in self._wellness_controls.values():
             s.set(setting_key, enabled.isChecked())

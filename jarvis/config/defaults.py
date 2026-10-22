@@ -43,9 +43,13 @@ DEFAULTS: dict[str, Any] = {
 
     # ── Voice ────────────────────────────────────────────────────────────────
     "voice_enabled":        False,
+    "voice_auto_listen":    True,
+    "voice_silence_ms":     900,
+    "voice_interrupt_tts":  True,
     "voice_wake_word":      "jarvis",
     "voice_model_id":       "base.en",
     "voice_language":       "en-US",
+    "image_generation_model": "",
     "voice_model_path":     "",          # local faster-whisper model directory
     "voice_device":         "cpu",
     "voice_compute_type":   "int8",
@@ -66,7 +70,8 @@ DEFAULTS: dict[str, Any] = {
     "ai_primary_credential_id": "",
     "ai_credentials":       [],
     "ai_provider_enabled":  {
-        "gemini": True, "openrouter": True, "grok": True, "openai": True,
+        "gemini": True, "openrouter": True, "grok": True, "groq": True,
+        "openai": True,
     },
     "ai_fallback_enabled":  True,
     "ai_fallback_routes":  [],
@@ -84,6 +89,7 @@ DEFAULTS: dict[str, Any] = {
     "ai_advanced_route_enabled": False,
     "ai_advanced_model":    "",
     "ai_free_models_only":  False,
+    "ai_chat_free_only":    True,
     "ai_model_catalog_ttl_seconds": 3600,
     "ai_model":             "",
     "ai_api_key_env_var":   "",
@@ -91,6 +97,13 @@ DEFAULTS: dict[str, Any] = {
     "ai_trigger_enabled":   True,
     "ai_trigger_keyword":   "Friday",
     "ai_trigger_aliases":   [],
+    "search_provider":      "brave",
+    "search_openrouter_model": "",
+    "search_result_limit":  5,
+    "search_timeout_seconds": 12,
+    "search_cache_ttl_minutes": 240,
+    "search_news_cache_ttl_minutes": 15,
+    "voice_actions_enabled": True,
 
     # ── Focus mode ───────────────────────────────────────────────────────────
     "focus_duration_minutes":       25,

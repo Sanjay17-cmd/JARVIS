@@ -58,3 +58,19 @@ def test_reminder_toast_stays_at_screen_bottom_even_with_robot_anchor(qtbot):
     assert toast.geometry().right() == bounds.right() - 15
     assert toast.geometry().bottom() == bounds.bottom() - 15
     toast.close()
+
+
+def test_robot_reminder_bubble_matches_alert_speech_bubble_design(qtbot):
+    from PySide6.QtWidgets import QWidget
+    from jarvis.ui.overlay import _ReminderBubble
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    bubble = _ReminderBubble(parent)
+    bubble.set_message("Submit the report", 5000)
+    qtbot.wait(20)
+
+    assert bubble.isVisible()
+    assert bubble._label.text() == "ALERT!\nSubmit the report"
+    assert bubble.width() > bubble.height()
+    bubble.close()

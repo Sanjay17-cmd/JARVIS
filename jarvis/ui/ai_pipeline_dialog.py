@@ -32,6 +32,7 @@ _PROVIDERS = (
     ("Gemini", "gemini", "gemini-2.5-flash"),
     ("OpenRouter", "openrouter", ""),
     ("Grok (xAI)", "grok", ""),
+    ("Groq", "groq", ""),
 )
 
 
@@ -91,8 +92,15 @@ class AIPipelineDialog(QDialog):
             checkbox.setChecked(enabled_config.get(provider_id, True))
             self.provider_enabled[provider_id] = checkbox
             provider_checks.addWidget(checkbox)
-        self.free_only = QCheckBox("Show only free models (OpenRouter)")
+        self.free_only = QCheckBox("Filter model list to free OpenRouter models")
         self.free_only.setChecked(self._settings.get("ai_free_models_only", False))
+        self.free_chat_only = QCheckBox(
+            "Free-only chat (uncheck to choose Gemini, Groq, or another provider)"
+        )
+        self.free_chat_only.setChecked(
+            self._settings.get("ai_chat_free_only", True)
+        )
+        self.free_chat_only.toggled.connect(self._apply_free_chat_mode)
         self.advanced_enabled = QCheckBox("Use advanced model for complex requests")
         self.advanced_enabled.setChecked(
             self._settings.get("ai_advanced_route_enabled", False)
@@ -109,6 +117,15 @@ class AIPipelineDialog(QDialog):
         form.addRow("Environment key variable:", self.environment_name)
         form.addRow("Enabled providers:", provider_checks)
         form.addRow("", self.free_only)
+        form.addRow("", self.free_chat_only)
+        form.addRow(
+            "",
+            QLabel(
+                "Free-only chat ignores other providers, paid models, advanced "
+                "routing, and fallback routes. Groq is available when this mode "
+                "is disabled; its API catalogue does not declare zero-priced models."
+            ),
+        )
         form.addRow("", self.advanced_enabled)
         form.addRow("Advanced model:", self.advanced_model)
 
@@ -119,12 +136,14 @@ class AIPipelineDialog(QDialog):
         self.fallback_enabled = QCheckBox("Enable ordered fallback providers")
         self.fallback_enabled.setChecked(self._settings.get("ai_fallback_enabled", True))
         form.addRow("", self.fallback_enabled)
+        self.free_only.toggled.connect(self._load_models)
 
         root.addLayout(form)
         root.addWidget(QLabel("Fallback order (top to bottom):"))
         self.fallbacks = QListWidget()
         root.addWidget(self.fallbacks)
         fallback_controls = QHBoxLayout()
+        self._fallback_buttons: list[QPushButton] = []
         for label, callback in (
             ("Add", self._add_fallback),
             ("Remove", self._remove_fallback),
@@ -133,6 +152,7 @@ class AIPipelineDialog(QDialog):
         ):
             button = QPushButton(label)
             button.clicked.connect(callback)
+            self._fallback_buttons.append(button)
             fallback_controls.addWidget(button)
         root.addLayout(fallback_controls)
         self._load_fallbacks()
@@ -185,6 +205,7 @@ class AIPipelineDialog(QDialog):
         scroll.setWidget(content)
         outer.addWidget(scroll)
         self._provider_changed()
+        self._apply_free_chat_mode()
         self._update_usage()
 
     def _spin(self, minimum: int, maximum: int, key: str, default: int) -> QSpinBox:
@@ -195,9 +216,34 @@ class AIPipelineDialog(QDialog):
 
     def _provider_changed(self, *_args) -> None:
         provider = self.provider.currentData()
-        self.free_only.setVisible(provider == "openrouter")
+        if self.free_chat_only.isChecked() and provider != "openrouter":
+            index = self.provider.findData("openrouter")
+            if index >= 0:
+                self.provider.setCurrentIndex(index)
+                return
+        self.free_only.setVisible(
+            provider == "openrouter" or self.free_chat_only.isChecked()
+        )
         self._load_models(reset_selection=True)
         self._load_credentials()
+
+    def _apply_free_chat_mode(self, *_args) -> None:
+        free_only = self.free_chat_only.isChecked()
+        if free_only and self.provider.currentData() != "openrouter":
+            index = self.provider.findData("openrouter")
+            if index >= 0:
+                self.provider.setCurrentIndex(index)
+        self.provider.setEnabled(not free_only)
+        for checkbox in self.provider_enabled.values():
+            checkbox.setEnabled(not free_only)
+        self.fallback_enabled.setEnabled(not free_only)
+        self.fallbacks.setEnabled(not free_only)
+        for button in self._fallback_buttons:
+            button.setEnabled(not free_only)
+        self.advanced_enabled.setEnabled(not free_only)
+        self.advanced_model.setEnabled(not free_only)
+        self.model.setEditable(not free_only)
+        self._load_models()
 
     @staticmethod
     def _model_order(provider: str, model: dict) -> tuple:
@@ -219,10 +265,12 @@ class AIPipelineDialog(QDialog):
         catalog = store.cached_model_catalog(provider)
         catalog_ids = {item["id"] for item in catalog}
         models = catalog
-        if provider == "openrouter" and self.free_only.isChecked():
+        if provider == "openrouter" and (
+            self.free_only.isChecked() or self.free_chat_only.isChecked()
+        ):
             models = [item for item in models if item.get("free")]
         models.sort(key=lambda item: self._model_order(provider, item))
-        if not models:
+        if not models and not self.free_chat_only.isChecked():
             default = next(
                 (item[2] for item in self._provider_options if item[1] == provider),
                 "",
@@ -591,10 +639,17 @@ class AIPipelineDialog(QDialog):
 
     def _save(self) -> None:
         provider = str(self.provider.currentData())
-        model = self.model.currentData() or self.model.currentText().strip()
-        if not model:
+        free_chat_only = self.free_chat_only.isChecked()
+        model = (
+            str(self.model.currentData() or "")
+            if free_chat_only
+            else self.model.currentData() or self.model.currentText().strip()
+        )
+        if not model and not free_chat_only:
             QMessageBox.warning(self, "Model required", "Select or enter a model ID.")
             return
+        if free_chat_only:
+            provider = "openrouter"
         routes = []
         for index in range(self.fallbacks.count()):
             item = self.fallbacks.item(index)
@@ -630,6 +685,7 @@ class AIPipelineDialog(QDialog):
         self._settings.set("ai_cache_enabled", self.cache_enabled.isChecked())
         self._settings.set("ai_cache_expiry_minutes", self.cache_expiry.value())
         self._settings.set("ai_free_models_only", self.free_only.isChecked())
+        self._settings.set("ai_chat_free_only", free_chat_only)
         self._settings.set(
             "ai_advanced_route_enabled", self.advanced_enabled.isChecked()
         )
